@@ -1,4 +1,5 @@
 -- Safe Cracking Paths
+-- Route navigation and custom route management.
 local prettyui = assert(PrettyUI or prettyui, "PrettyUI dependency unavailable")
 
 local STOP_NAMES = {
@@ -34,6 +35,10 @@ local STOP_NAMES = {
     ["030"] = "Zanaris: Market",
     ["031"] = "Wilderness: Zemouregal's Fort",
 }
+
+-- Safe locations and ordered actions, including floor transitions.
+local STOP_DATA = {["001"] = {["name"] = "Edgeville: General Store", ["steps"] = {{["action"] = "Climb-up", ["detail"] = "Climb the ladder in the general store.", ["travel"] = "Easiest travel: Edgeville lodestone.", ["object"] = "Ladder", ["x"] = 3082, ["y"] = 3513, ["plane"] = 0, ["advancePlane"] = 1}, {["object"] = "Safe", ["x"] = 3084, ["y"] = 3507, ["plane"] = 1, ["detail"] = "Upstairs in the general store."}}}, ["002"] = {["name"] = "Varrock: Palace", ["steps"] = {{["action"] = "Climb-up", ["detail"] = "Travel to Varrock Palace and climb the stairs.", ["travel"] = "Varrock Teleport is closer but costs runes; Varrock lodestone is free.", ["object"] = "Staircase", ["x"] = 3212, ["y"] = 3473, ["plane"] = 0, ["advancePlane"] = 1}, {["action"] = "Climb-up", ["detail"] = "Go through the doors and climb the ladder.", ["object"] = "Ladder", ["x"] = 3224, ["y"] = 3472, ["plane"] = 1, ["advancePlane"] = 2}, {["object"] = "Safe", ["x"] = 3200, ["y"] = 3473, ["plane"] = 2, ["detail"] = "Pick-lock the treasury door (may take several attempts) to reach this safe."}, {["object"] = "Safe", ["x"] = 3200, ["y"] = 3471, ["plane"] = 2}, {["object"] = "Safe", ["x"] = 3203, ["y"] = 3469, ["plane"] = 2}}}, ["003"] = {["name"] = "Draynor: Manor", ["steps"] = {{["object"] = "Safe", ["x"] = 3104, ["y"] = 3362, ["plane"] = 0, ["detail"] = "First safe in Draynor Manor.", ["travel"] = "Travel: Draynor lodestone."}, {["object"] = "Safe", ["x"] = 3104, ["y"] = 3355, ["plane"] = 0, ["detail"] = "Second safe in Draynor Manor."}}}, ["004"] = {["name"] = "Draynor: Wise Old Man’s House", ["steps"] = {{["action"] = "Climb-up", ["detail"] = "Enter the Wise Old Man’s house and climb the stairs.", ["travel"] = "Travel: Draynor lodestone.", ["object"] = "Stairs", ["x"] = 3091, ["y"] = 3251, ["plane"] = 0, ["advancePlane"] = 1}, {["object"] = "Safe", ["x"] = 3094, ["y"] = 3251, ["plane"] = 1}}}, ["005"] = {["name"] = "Draynor: Wizards’ Tower", ["steps"] = {{["action"] = "Reach the tower second floor", ["detail"] = "Wicked hood: teleport to Runecrafting Guild and descend via the beam. Alternatively, travel from Draynor and ascend using the beam.", ["travel"] = "Fastest: Wicked hood → Runecrafting Guild. Alternative: Draynor lodestone.", ["object"] = "Beam", ["x"] = 3102, ["y"] = 3155, ["plane"] = 1, ["advancePlane"] = 2, ["alternativePlanes"] = {0, 3}}, {["object"] = "Safe", ["x"] = 3096, ["y"] = 3154, ["plane"] = 2}, {["object"] = "Safe", ["x"] = 3109, ["y"] = 3156, ["plane"] = 2}}}, ["006"] = {["name"] = "Lumbridge: Bob’s Axes", ["steps"] = {{["action"] = "Climb-up", ["detail"] = "Climb the stairs inside Bobs Axes.", ["travel"] = "Travel: Lumbridge lodestone.", ["object"] = "Stairs", ["x"] = 3230, ["y"] = 3204, ["plane"] = 0, ["advancePlane"] = 1}, {["object"] = "Safe", ["x"] = 3233, ["y"] = 3203, ["plane"] = 1}}}, ["007"] = {["name"] = "Lumbridge: Roddeck’s House", ["steps"] = {{["action"] = "Climb-down", ["detail"] = "Return to the ground floor.", ["object"] = "Stairs", ["x"] = 3230, ["y"] = 3205, ["plane"] = 1, ["advancePlane"] = 0}, {["action"] = "Climb-up", ["detail"] = "Enter Roddecks house and climb the stairs.", ["object"] = "Stairs", ["x"] = 3232, ["y"] = 3239, ["plane"] = 0, ["advancePlane"] = 1}, {["object"] = "Safe", ["x"] = 3229, ["y"] = 3238, ["plane"] = 1}}}, ["008"] = {["name"] = "Menaphos: Merchant District", ["steps"] = {{["object"] = "Safe", ["x"] = 3201, ["y"] = 2789, ["plane"] = 0, ["detail"] = "Across from the silk stall.", ["travel"] = "Merchant District teleport for direct access, or Menaphos lodestone."}, {["object"] = "Safe", ["x"] = 3244, ["y"] = 2779, ["plane"] = 0, ["detail"] = "By the general store."}}}, ["009"] = {["name"] = "Menaphos: Port District", ["steps"] = {{["object"] = "Safe", ["x"] = 3166, ["y"] = 2630, ["plane"] = 0, ["travel"] = "Port District teleport for direct access, or Menaphos lodestone."}}}, ["010"] = {["name"] = "Menaphos: Imperial District", ["steps"] = {{["object"] = "Safe", ["x"] = 3120, ["y"] = 2682, ["plane"] = 0, ["travel"] = "Imperial District teleport for direct access, or Menaphos lodestone."}, {["object"] = "Safe", ["x"] = 3095, ["y"] = 2720, ["plane"] = 0, ["detail"] = "Requires tier 5 Imperial District reputation. Checks automatically; use Skip step if unavailable.", ["optional"] = true}}}, ["011"] = {["name"] = "Al Kharid", ["steps"] = {{["object"] = "Safe", ["x"] = 3296, ["y"] = 3189, ["plane"] = 0, ["travel"] = "Teleport to Al Kharid lodestone."}, {["action"] = "Climb-up", ["detail"] = "Climb the steps to the upstairs safe.", ["object"] = "Steps", ["x"] = 3283, ["y"] = 3187, ["plane"] = 0, ["advancePlane"] = 1}, {["object"] = "Safe", ["x"] = 3289, ["y"] = 3192, ["plane"] = 1}}}, ["012"] = {["name"] = "Nardah: Mayor’s House", ["steps"] = {{["action"] = "Climb-up", ["detail"] = "Climb the staircase in Nardah.", ["travel"] = "Fastest: Desert amulet 2/3/4 teleport to Nardah. Alternatives: magic carpet, fairy ring DLQ or other desert travel.", ["object"] = "Staircase", ["x"] = 3444, ["y"] = 2911, ["plane"] = 0, ["advancePlane"] = 1}, {["object"] = "Safe", ["x"] = 3444, ["y"] = 2909, ["plane"] = 1}}}, ["013"] = {["name"] = "Pollnivneach: Mayor’s House", ["steps"] = {{["object"] = "Safe", ["x"] = 3366, ["y"] = 2974, ["plane"] = 0, ["travel"] = "From Nardah, take the magic carpet to South Pollnivneach."}, {["object"] = "Safe", ["x"] = 3366, ["y"] = 2976, ["plane"] = 0}}}, ["014"] = {["name"] = "Asgarnia: Black Knights' Fortress", ["steps"] = {{["action"] = "Climb down", ["detail"] = "Use the staircase to descend from the upper floor.", ["travel"] = "Fastest: Skull of Remembrance teleport.", ["object"] = "Staircase", ["x"] = 3031, ["y"] = 3577, ["plane"] = 3, ["advancePlane"] = 2}, {["object"] = "Safe", ["x"] = 3014, ["y"] = 3568, ["plane"] = 2}, {["object"] = "Safe", ["x"] = 3018, ["y"] = 3568, ["plane"] = 2}}}, ["015"] = {["name"] = "Burthorpe: Castle", ["steps"] = {{["action"] = "Climb up", ["object"] = "Ladder", ["x"] = 2894, ["y"] = 3559, ["plane"] = 0, ["advancePlane"] = 2, ["travel"] = "Teleport to Burthorpe lodestone."}, {["object"] = "Safe", ["x"] = 2898, ["y"] = 3566, ["plane"] = 2}, {["object"] = "Safe", ["x"] = 2898, ["y"] = 3567, ["plane"] = 2}}}, ["016"] = {["name"] = "Port Sarim: Jewellery Store", ["steps"] = {{["action"] = "Climb up", ["object"] = "Ladder", ["x"] = 3013, ["y"] = 3244, ["plane"] = 0, ["advancePlane"] = 1, ["travel"] = "Teleport to Port Sarim lodestone."}, {["object"] = "Safe", ["x"] = 3017, ["y"] = 3244, ["plane"] = 1}, {["action"] = "Climb down", ["object"] = "Ladder", ["x"] = 3013, ["y"] = 3244, ["plane"] = 1, ["advancePlane"] = 0}}}, ["017"] = {["name"] = "Port Sarim: Brian's Battleaxe Bazaar", ["steps"] = {{["action"] = "Climb-up", ["object"] = "Staircase", ["x"] = 3023, ["y"] = 3248, ["plane"] = 0, ["advancePlane"] = 1}, {["object"] = "Safe", ["x"] = 3025, ["y"] = 3246, ["plane"] = 1}}}, ["018"] = {["name"] = "Falador: Gardener's House", ["steps"] = {{["object"] = "Safe", ["x"] = 3029, ["y"] = 3379, ["plane"] = 0, ["travel"] = "Teleport to Falador lodestone."}}}, ["019"] = {["name"] = "Falador: House North of Fountain", ["steps"] = {{["action"] = "Climb-up", ["object"] = "Staircase", ["x"] = 3034, ["y"] = 3363, ["plane"] = 0, ["advancePlane"] = 1}, {["object"] = "Safe", ["x"] = 3034, ["y"] = 3361, ["plane"] = 1}, {["action"] = "Climb-down", ["object"] = "Staircase", ["x"] = 3035, ["y"] = 3363, ["plane"] = 1, ["advancePlane"] = 0}}}, ["020"] = {["name"] = "Falador: House East of Fountain", ["steps"] = {{["action"] = "Climb-up", ["object"] = "Staircase", ["x"] = 3048, ["y"] = 3352, ["plane"] = 0, ["advancePlane"] = 1}, {["action"] = "Climb-up", ["object"] = "Ladder", ["x"] = 3050, ["y"] = 3355, ["plane"] = 1, ["advancePlane"] = 2}, {["object"] = "Safe", ["x"] = 3048, ["y"] = 3355, ["plane"] = 2}, {["action"] = "Climb-down", ["object"] = "Ladder", ["x"] = 3050, ["y"] = 3355, ["plane"] = 2, ["advancePlane"] = 1}, {["action"] = "Climb-down", ["object"] = "Staircase", ["x"] = 3049, ["y"] = 3353, ["plane"] = 1, ["advancePlane"] = 0}}}, ["021"] = {["name"] = "Falador: South Mining Guild House", ["steps"] = {{["action"] = "Climb-up", ["object"] = "Staircase", ["x"] = 3021, ["y"] = 3332, ["plane"] = 0, ["advancePlane"] = 1}, {["object"] = "Safe", ["x"] = 3023, ["y"] = 3335, ["plane"] = 1}}}, ["022"] = {["name"] = "Camelot: Castle", ["steps"] = {{["object"] = "Safe", ["x"] = 2749, ["y"] = 3500, ["plane"] = 0, ["travel"] = "Camelot Teleport spell or Seers’ Village lodestone."}, {["object"] = "Safe", ["x"] = 2751, ["y"] = 3500, ["plane"] = 0}}}, ["023"] = {["name"] = "Yanille: South Wall", ["steps"] = {{["object"] = "Safe", ["x"] = 2533, ["y"] = 3084, ["plane"] = 0, ["travel"] = "Fastest: Yanille lodestone teleport."}}}, ["024"] = {["name"] = "Yanille: The Dragon Inn", ["steps"] = {{["action"] = "Climb up", ["object"] = "Ladder", ["x"] = 2556, ["y"] = 3081, ["plane"] = 0, ["advancePlane"] = 1}, {["object"] = "Safe", ["x"] = 2556, ["y"] = 3077, ["plane"] = 1}}}, ["025"] = {["name"] = "Ardougne: Jimmy Dazzler’s House", ["steps"] = {{["action"] = "Climb-up", ["object"] = "Staircase", ["x"] = 2565, ["y"] = 3322, ["plane"] = 0, ["advancePlane"] = 1, ["travel"] = "Teleport to Ardougne lodestone."}, {["object"] = "Safe", ["x"] = 2568, ["y"] = 3322, ["plane"] = 1}, {["action"] = "Climb-down", ["object"] = "Staircase", ["x"] = 2565, ["y"] = 3322, ["plane"] = 1, ["advancePlane"] = 0}}}, ["026"] = {["name"] = "Ardougne: Castle", ["steps"] = {{["action"] = "Climb-up", ["object"] = "Staircase", ["x"] = 2571, ["y"] = 3285, ["plane"] = 0, ["advancePlane"] = 1, ["alternateTargets"] = {{["x"] = 2571, ["y"] = 3307, ["plane"] = 0}}, ["detail"] = "Either highlighted staircase works."}, {["object"] = "Safe", ["x"] = 2574, ["y"] = 3305, ["plane"] = 1}, {["object"] = "Safe", ["x"] = 2574, ["y"] = 3288, ["plane"] = 1}}}, ["027"] = {["name"] = "Ardougne: House West of Silk Stall", ["steps"] = {{["action"] = "Climb-up", ["object"] = "Staircase", ["x"] = 2649, ["y"] = 3297, ["plane"] = 0, ["advancePlane"] = 1, ["travel"] = "Fastest: Ardougne Teleport spell."}, {["object"] = "Safe", ["x"] = 2649, ["y"] = 3301, ["plane"] = 1}, {["action"] = "Climb-down", ["object"] = "Staircase", ["x"] = 2649, ["y"] = 3297, ["plane"] = 1, ["advancePlane"] = 0}}}, ["028"] = {["name"] = "Ardougne: House North of Market", ["steps"] = {{["action"] = "Climb-up", ["object"] = "Staircase", ["x"] = 2663, ["y"] = 3321, ["plane"] = 0, ["advancePlane"] = 1}, {["object"] = "Safe", ["x"] = 2655, ["y"] = 3319, ["plane"] = 1}}}, ["029"] = {["name"] = "Wilderness: Rogues' Den", ["steps"] = {{["action"] = "Climb-up", ["object"] = "Staircase", ["x"] = 3280, ["y"] = 3936, ["plane"] = 0, ["advancePlane"] = 1, ["travel"] = "Easiest: Use a POH or portable Wilderness obelisk to teleport to level 50 Wilderness. Other routes to level 50 Wilderness also work."}, {["object"] = "Safe", ["x"] = 3296, ["y"] = 3934, ["plane"] = 1}, {["object"] = "Safe", ["x"] = 3295, ["y"] = 3932, ["plane"] = 1}, {["object"] = "Safe", ["x"] = 3293, ["y"] = 3933, ["plane"] = 1}}}, ["030"] = {["name"] = "Zanaris: Market", ["steps"] = {{["object"] = "Safe", ["x"] = 2468, ["y"] = 4421, ["plane"] = 0, ["travel"] = "Easiest: Use a fairy ring in your POH or a portable fairy ring to teleport to Zanaris."}, {["object"] = "Safe", ["x"] = 2479, ["y"] = 4447, ["plane"] = 0}}}, ["031"] = {["name"] = "Wilderness: Zemouregal's Fort", ["steps"] = {{["action"] = "Leave", ["object"] = "Exit", ["x"] = 4196, ["y"] = 5756, ["plane"] = 0, ["exitTransition"] = true, ["travel"] = "Easiest: Use a fairy ring in your POH or a portable fairy ring, code DKQ. Leave through the highlighted exit to reach the Wilderness safes."}, {["object"] = "Safe", ["x"] = 2843, ["y"] = 3847, ["plane"] = 0}, {["object"] = "Safe", ["x"] = 2841, ["y"] = 3847, ["plane"] = 0}, {["object"] = "Safe", ["x"] = 2839, ["y"] = 3847, ["plane"] = 0}, {["object"] = "Safe", ["x"] = 2837, ["y"] = 3847, ["plane"] = 0}}}}
+
 local ROUTES = {
     { id = "misthalin", name = "Misthalin", ids = {"001", "002", "003", "004", "005", "006", "007"} },
     { id = "desert", name = "Kharidian Desert", ids = {"008", "009", "010", "011", "012", "013"} },
@@ -49,12 +54,12 @@ local state = {
     customName = "", customIDs = {}, customRoutes = {},
     editing = nil, selectedStop = "001", jsonText = "",
 }
--- All three surfaces share the same session state.
+-- Both windows share the same route state.
 local pathsWindow, customWindow, hubRoot
 local routeCombo, progressLabel, objectiveLabel, travelLabel, statusLabel, routeList
 local savedCombo, nameField, locationCombo, customList, customFeedback
 local selectedIndex = 1
-local HUB_EVENT = "safecracking-launcher-v5"
+local HUB_EVENT = "safecracking-launcher"
 
 local function route() return ROUTES[state.route] end
 local function currentIDs() return route().ids end
@@ -66,25 +71,50 @@ end
 local function feedback(message)
     if customFeedback then customFeedback.content = message end
 end
+-- Build the ordered action list for the selected route.
+local function actionsForRoute()
+    local result = {}
+    for locationIndex, stopID in ipairs(currentIDs()) do
+        local location = STOP_DATA[stopID]
+        if location then
+            for actionIndex, action in ipairs(location.steps) do
+                result[#result + 1] = {stopID = stopID, locationIndex = locationIndex,
+                    actionIndex = actionIndex, location = location.name, action = action}
+            end
+        end
+    end
+    return result
+end
 local function updateRouting()
-    local ids = currentIDs()
-    state.step = math.max(1, math.min(state.step, #ids))
-    local id = ids[state.step]
-    local percent = math.floor((state.step - 1) / math.max(1, #ids) * 100)
-    if progressLabel then progressLabel.content = string.format("%d%%  |  %d / %d locations", percent, state.step - 1, #ids) end
-    if objectiveLabel then objectiveLabel.content = string.format("%02d / %02d  %s", state.step, #ids, STOP_NAMES[id] or id) end
-    if travelLabel then travelLabel.content = "Manual preview - detailed travel instructions and actions will be restored from route data." end
-    if statusLabel then statusLabel.content = "Overlay: " .. state.overlay .. "  |  Tracking not connected" end
+    local actions = actionsForRoute()
+    local total = #actions
+    if total == 0 then return end
+    state.step = math.max(1, math.min(state.step, total))
+    local item = actions[state.step]
+    local action = item.action
+    local label = action.action or (action.object == "Safe" and "Crack safe" or "Interact")
+    local coords = string.format("%d, %d | Floor %d", action.x or 0, action.y or 0, action.plane or 0)
+    local percent = math.floor((state.step - 1) / total * 100)
+    if progressLabel then progressLabel.content = string.format("%d%% | Action %d / %d | Location %d / %d", percent, state.step, total, item.locationIndex, #currentIDs()) end
+    if objectiveLabel then objectiveLabel.content = string.format("%s: %s", item.location, label) end
+    if travelLabel then
+        local description = action.detail or (action.object and ("Target: " .. action.object) or "Proceed to the target")
+        local travel = action.travel and (" | " .. action.travel) or ""
+        travelLabel.content = description .. " | " .. coords .. travel
+    end
+    if statusLabel then statusLabel.content = "Manual navigation | Overlay: " .. state.overlay .. (action.optional and " | Optional action" or "") end
     if routeList then
         local entries = {}
-        for i, stop in ipairs(ids) do
-            entries[i] = {id = i, label = string.format("%s %02d  %s", i < state.step and "[x]" or (i == state.step and ">" or "  "), i, STOP_NAMES[stop] or stop)}
+        for i, entry in ipairs(actions) do
+            local a = entry.action
+            local name = a.action or (a.object == "Safe" and "Crack safe" or "Interact")
+            entries[i] = {id = i, label = string.format("%s %02d  %s - %s", i < state.step and "[x]" or (i == state.step and ">" or " "), i, entry.location, name)}
         end
         routeList:SetEntries(entries)
     end
 end
 local function changeStep(amount)
-    state.step = math.max(1, math.min(#currentIDs(), state.step + amount))
+    state.step = math.max(1, math.min(#actionsForRoute(), state.step + amount))
     updateRouting()
 end
 local function routeEntries()
@@ -135,8 +165,7 @@ local function saveCustom()
     feedback("Saved for this session: " .. name)
 end
 
--- Fixed-position content avoids mixing PrettyUI flow layout and inline controls.
--- Coordinates are relative to the Window.content layer, not the title bar.
+-- Position controls relative to the window content area.
 local function textAt(win, value, x, y, height, colour)
     return prettyui.Text.new(win.content, {
         text = value, x = x, y = y, width = -x - 12, widthAnchor = 1.0,
@@ -178,17 +207,17 @@ local function openPaths()
     progressLabel = textAt(pathsWindow, "0%", 12, 125, 24)
     textAt(pathsWindow, "CURRENT OBJECTIVE", 12, 157, 20, GOLD)
     objectiveLabel = textAt(pathsWindow, "", 12, 180, 27)
-    travelLabel = textAt(pathsWindow, "", 12, 210, 44)
+    travelLabel = textAt(pathsWindow, "", 12, 210, 48)
     buttonAt(pathsWindow, "Previous", function() changeStep(-1) end, 12, 262, 88)
     buttonAt(pathsWindow, "Next >", function() changeStep(1) end, 107, 262, 78)
     buttonAt(pathsWindow, "Refresh", updateRouting, 192, 262, 82)
     buttonAt(pathsWindow, "Restart", function() state.step = 1 updateRouting() end, 281, 262, 86)
-    textAt(pathsWindow, "ROUTE STEPS", 12, 303, 20, GOLD)
+    textAt(pathsWindow, "ROUTE ACTIONS", 12, 303, 20, GOLD)
     routeList = prettyui.List.new(pathsWindow.content, {
         x = 12, y = 328, width = -24, widthAnchor = 1.0,
         height = 114, maxSelected = 1, entries = {},
         onChange = function(_, index, selected)
-            if selected and type(index) == "number" and index >= 1 and index <= #currentIDs() then
+            if selected and type(index) == "number" and index >= 1 and index <= #actionsForRoute() then
                 state.step = index
                 updateRouting()
             end
@@ -297,6 +326,7 @@ local function openCustom()
     log("Safe Cracking Paths: Custom Paths window opened")
 end
 
+-- The native plugin panel is intentionally ONLY a two-button launcher.
 local function launcherButton(parent, label, y, callback)
     local button = ui.Button.new(parent)
     button.stylesheetID = id.StyleSheet.BUTTON_DEFAULT
