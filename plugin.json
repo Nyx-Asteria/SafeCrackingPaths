@@ -1,0 +1,10 @@
+{
+  "name": "Safe Cracking Paths",
+  "version": "1.0.0",
+  "contactEmailAddress": "moxxiferous@pm.me",
+  "requiredDependencies": {
+    "prettyui": 6398181
+  },
+  "optionalDependencies": {},
+  "hasRibbonIcon": true
+}

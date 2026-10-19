@@ -1,0 +1,330 @@
+-- Safe Cracking Paths
+local prettyui = assert(PrettyUI or prettyui, "PrettyUI dependency unavailable")
+
+local STOP_NAMES = {
+    ["001"] = "Edgeville: General Store",
+    ["002"] = "Varrock: Palace",
+    ["003"] = "Draynor: Manor",
+    ["004"] = "Draynor: Wise Old Man’s House",
+    ["005"] = "Draynor: Wizards’ Tower",
+    ["006"] = "Lumbridge: Bob’s Axes",
+    ["007"] = "Lumbridge: Roddeck’s House",
+    ["008"] = "Menaphos: Merchant District",
+    ["009"] = "Menaphos: Port District",
+    ["010"] = "Menaphos: Imperial District",
+    ["011"] = "Al Kharid",
+    ["012"] = "Nardah: Mayor’s House",
+    ["013"] = "Pollnivneach: Mayor’s House",
+    ["014"] = "Asgarnia: Black Knights' Fortress",
+    ["015"] = "Burthorpe: Castle",
+    ["016"] = "Port Sarim: Jewellery Store",
+    ["017"] = "Port Sarim: Brian's Battleaxe Bazaar",
+    ["018"] = "Falador: Gardener's House",
+    ["019"] = "Falador: House North of Fountain",
+    ["020"] = "Falador: House East of Fountain",
+    ["021"] = "Falador: South Mining Guild House",
+    ["022"] = "Camelot: Castle",
+    ["023"] = "Yanille: South Wall",
+    ["024"] = "Yanille: The Dragon Inn",
+    ["025"] = "Ardougne: Jimmy Dazzler’s House",
+    ["026"] = "Ardougne: Castle",
+    ["027"] = "Ardougne: House West of Silk Stall",
+    ["028"] = "Ardougne: House North of Market",
+    ["029"] = "Wilderness: Rogues' Den",
+    ["030"] = "Zanaris: Market",
+    ["031"] = "Wilderness: Zemouregal's Fort",
+}
+local ROUTES = {
+    { id = "misthalin", name = "Misthalin", ids = {"001", "002", "003", "004", "005", "006", "007"} },
+    { id = "desert", name = "Kharidian Desert", ids = {"008", "009", "010", "011", "012", "013"} },
+    { id = "menaphos", name = "Menaphos Only", ids = {"008", "009", "010"} },
+    { id = "asgarnia", name = "Asgarnia", ids = {"014", "015", "016", "017", "018", "019", "020", "021"} },
+    { id = "kandarin", name = "Kandarin", ids = {"022", "023", "024", "025", "026", "027", "028"} },
+    { id = "hidden", name = "Hidden", ids = {"029", "030", "031"} },
+    { id = "allSafes", name = "All Safes", ids = {"001", "002", "003", "004", "005", "006", "007", "008", "009", "010", "011", "012", "013", "014", "015", "016", "017", "018", "019", "020", "021", "022", "023", "024", "025", "026", "027", "028", "029", "030", "031"} },
+}
+
+local state = {
+    route = 1, step = 1, overlay = "highlight",
+    customName = "", customIDs = {}, customRoutes = {},
+    editing = nil, selectedStop = "001", jsonText = "",
+}
+-- All three surfaces share the same session state.
+local pathsWindow, customWindow, hubRoot
+local routeCombo, progressLabel, objectiveLabel, travelLabel, statusLabel, routeList
+local savedCombo, nameField, locationCombo, customList, customFeedback
+local selectedIndex = 1
+local HUB_EVENT = "safecracking-launcher-v5"
+
+local function route() return ROUTES[state.route] end
+local function currentIDs() return route().ids end
+local function copyIDs(ids)
+    local result = {}
+    for i, id in ipairs(ids) do result[i] = id end
+    return result
+end
+local function feedback(message)
+    if customFeedback then customFeedback.content = message end
+end
+local function updateRouting()
+    local ids = currentIDs()
+    state.step = math.max(1, math.min(state.step, #ids))
+    local id = ids[state.step]
+    local percent = math.floor((state.step - 1) / math.max(1, #ids) * 100)
+    if progressLabel then progressLabel.content = string.format("%d%%  |  %d / %d locations", percent, state.step - 1, #ids) end
+    if objectiveLabel then objectiveLabel.content = string.format("%02d / %02d  %s", state.step, #ids, STOP_NAMES[id] or id) end
+    if travelLabel then travelLabel.content = "Manual preview - detailed travel instructions and actions will be restored from route data." end
+    if statusLabel then statusLabel.content = "Overlay: " .. state.overlay .. "  |  Tracking not connected" end
+    if routeList then
+        local entries = {}
+        for i, stop in ipairs(ids) do
+            entries[i] = {id = i, label = string.format("%s %02d  %s", i < state.step and "[x]" or (i == state.step and ">" or "  "), i, STOP_NAMES[stop] or stop)}
+        end
+        routeList:SetEntries(entries)
+    end
+end
+local function changeStep(amount)
+    state.step = math.max(1, math.min(#currentIDs(), state.step + amount))
+    updateRouting()
+end
+local function routeEntries()
+    local entries = {}
+    for i, item in ipairs(ROUTES) do
+        entries[#entries + 1] = {id = i, label = string.format("%s (%d locations)", item.name, #item.ids)}
+    end
+    return entries
+end
+local function refreshCustomList()
+    if not customList then return end
+    local entries = {}
+    for i, id in ipairs(state.customIDs) do
+        entries[i] = {id = i, label = string.format("%02d  %s", i, STOP_NAMES[id] or id)}
+    end
+    if #entries == 0 then entries[1] = {id = 0, label = "No locations added"} end
+    customList:SetEntries(entries)
+end
+local function refreshSaved()
+    if not savedCombo then return end
+    local entries = {{id = 0, label = "New / unsaved route"}}
+    for i, custom in ipairs(state.customRoutes) do
+        entries[#entries + 1] = {id = i, label = custom.name}
+    end
+    savedCombo:SetEntries(entries)
+end
+local function showCustom(index)
+    state.editing = index ~= 0 and index or nil
+    local selected = state.editing and state.customRoutes[state.editing]
+    state.customIDs = selected and copyIDs(selected.ids) or {}
+    selectedIndex = 1
+    if nameField then nameField:SetText(selected and selected.name or "", false) end
+    refreshCustomList()
+    feedback(selected and ("Editing: " .. selected.name) or "New route")
+end
+local function saveCustom()
+    local name = nameField:GetText()
+    if #name < 1 or #name > 60 then feedback("Name must be 1-60 characters.") return end
+    if #state.customIDs == 0 then feedback("Add at least one location.") return end
+    local entry = {name = name, ids = copyIDs(state.customIDs)}
+    if state.editing then
+        state.customRoutes[state.editing] = entry
+    else
+        state.customRoutes[#state.customRoutes + 1] = entry
+        state.editing = #state.customRoutes
+    end
+    refreshSaved()
+    feedback("Saved for this session: " .. name)
+end
+
+-- Fixed-position content avoids mixing PrettyUI flow layout and inline controls.
+-- Coordinates are relative to the Window.content layer, not the title bar.
+local function textAt(win, value, x, y, height, colour)
+    return prettyui.Text.new(win.content, {
+        text = value, x = x, y = y, width = -x - 12, widthAnchor = 1.0,
+        height = height or 22, colour = colour or 0xE7D7B0FF,
+    })
+end
+local function buttonAt(win, label, action, x, y, width)
+    return prettyui.SimpleButton.new(win.content, label, action, {
+        x = x, y = y, width = width, height = 28,
+    })
+end
+local GOLD = 0xF2C66DFF
+
+local function openPaths()
+    if pathsWindow and pathsWindow.root then pathsWindow:Show() return end
+    local parent = ui.Interfaces:GetComponent(id.Component.TOPLEVEL_V2__PLUGIN_BUILD_LAYER_BOTTOM)
+    assert(parent, "Plugin build layer unavailable")
+    pathsWindow = prettyui.Window.new(parent, {
+        title = "Safe Cracking Paths - Paths", x = 270, y = 145,
+        width = 430, height = 525, resizable = false,
+    })
+    textAt(pathsWindow, "ROUTE", 12, 8, 20, GOLD)
+    routeCombo = prettyui.ComboBox.new(pathsWindow.content, {
+        x = 12, y = 30, width = -24, widthAnchor = 1.0, height = 28,
+        entries = routeEntries(), selectedID = state.route,
+        onChange = function(_, index)
+            if not ROUTES[index] then return end
+            state.route, state.step = index, 1
+            updateRouting()
+        end,
+    })
+    textAt(pathsWindow, "OVERLAY", 12, 67, 20, GOLD)
+    prettyui.RadioButton.new(pathsWindow.content, {
+        {text = "Highlight", value = "highlight"}, {text = "Tile", value = "tile"},
+    }, {x = 90, y = 65, width = 250, selectedValue = state.overlay, inline = true,
+        onChange = function(_, value) state.overlay = value updateRouting() end,
+    })
+    textAt(pathsWindow, "ROUTE PROGRESS", 12, 102, 20, GOLD)
+    progressLabel = textAt(pathsWindow, "0%", 12, 125, 24)
+    textAt(pathsWindow, "CURRENT OBJECTIVE", 12, 157, 20, GOLD)
+    objectiveLabel = textAt(pathsWindow, "", 12, 180, 27)
+    travelLabel = textAt(pathsWindow, "", 12, 210, 44)
+    buttonAt(pathsWindow, "Previous", function() changeStep(-1) end, 12, 262, 88)
+    buttonAt(pathsWindow, "Next >", function() changeStep(1) end, 107, 262, 78)
+    buttonAt(pathsWindow, "Refresh", updateRouting, 192, 262, 82)
+    buttonAt(pathsWindow, "Restart", function() state.step = 1 updateRouting() end, 281, 262, 86)
+    textAt(pathsWindow, "ROUTE STEPS", 12, 303, 20, GOLD)
+    routeList = prettyui.List.new(pathsWindow.content, {
+        x = 12, y = 328, width = -24, widthAnchor = 1.0,
+        height = 114, maxSelected = 1, entries = {},
+        onChange = function(_, index, selected)
+            if selected and type(index) == "number" and index >= 1 and index <= #currentIDs() then
+                state.step = index
+                updateRouting()
+            end
+        end,
+    })
+    statusLabel = textAt(pathsWindow, "", 12, 452, 22)
+    updateRouting()
+    pathsWindow:Show()
+    log("Safe Cracking Paths: Paths window opened")
+end
+
+local function openCustom()
+    if customWindow and customWindow.root then customWindow:Show() return end
+    local parent = ui.Interfaces:GetComponent(id.Component.TOPLEVEL_V2__PLUGIN_BUILD_LAYER_BOTTOM)
+    assert(parent, "Plugin build layer unavailable")
+    customWindow = prettyui.Window.new(parent, {
+        title = "Safe Cracking Paths - Custom Paths", x = 730, y = 145,
+        width = 430, height = 585, resizable = false,
+    })
+    textAt(customWindow, "SAVED CUSTOM ROUTES", 12, 8, 20, GOLD)
+    savedCombo = prettyui.ComboBox.new(customWindow.content, {
+        x = 12, y = 30, width = 250, height = 28,
+        entries = {{id = 0, label = "New / unsaved route"}}, selectedID = 0,
+        onChange = function(_, index) showCustom(index) end,
+    })
+    buttonAt(customWindow, "New", function() showCustom(0) end, 270, 30, 60)
+    buttonAt(customWindow, "Delete", function()
+        if not state.editing then feedback("Select a saved route first.") return end
+        table.remove(state.customRoutes, state.editing)
+        showCustom(0)
+        refreshSaved()
+        feedback("Route deleted from this session.")
+    end, 337, 30, 70)
+    textAt(customWindow, "ROUTE NAME", 12, 68, 20, GOLD)
+    nameField = prettyui.TextField.new(customWindow.content, {
+        x = 12, y = 90, width = -24, widthAnchor = 1.0,
+        height = 30, placeholder = "My safecracking route", maxLength = 60,
+    })
+    textAt(customWindow, "ADD LOCATION", 12, 130, 20, GOLD)
+    local stops = {}
+    for i = 1, 31 do
+        local stopID = string.format("%03d", i)
+        stops[i] = {id = stopID, label = STOP_NAMES[stopID] or stopID}
+    end
+    locationCombo = prettyui.ComboBox.new(customWindow.content, {
+        x = 12, y = 152, width = 245, height = 28,
+        entries = stops, selectedID = state.selectedStop,
+        onChange = function(_, stopID) state.selectedStop = stopID end,
+    })
+    buttonAt(customWindow, "+ Add", function()
+        for _, id in ipairs(state.customIDs) do
+            if id == state.selectedStop then feedback("Already in route.") return end
+        end
+        state.customIDs[#state.customIDs + 1] = state.selectedStop
+        refreshCustomList()
+        feedback("Location added.")
+    end, 266, 152, 67)
+    buttonAt(customWindow, "Clear", function()
+        state.customIDs = {}
+        selectedIndex = 1
+        refreshCustomList()
+        feedback("Locations cleared.")
+    end, 340, 152, 67)
+    textAt(customWindow, "ROUTE ORDER", 12, 192, 20, GOLD)
+    customList = prettyui.List.new(customWindow.content, {
+        x = 12, y = 214, width = -24, widthAnchor = 1.0,
+        height = 162, maxSelected = 1,
+        entries = {{id = 0, label = "No locations added"}},
+        onChange = function(_, index, selected) if selected then selectedIndex = index end end,
+    })
+    buttonAt(customWindow, "Up", function()
+        if selectedIndex <= 1 or selectedIndex > #state.customIDs then return end
+        state.customIDs[selectedIndex], state.customIDs[selectedIndex - 1] = state.customIDs[selectedIndex - 1], state.customIDs[selectedIndex]
+        selectedIndex = selectedIndex - 1
+        refreshCustomList()
+    end, 12, 389, 75)
+    buttonAt(customWindow, "Down", function()
+        if selectedIndex < 1 or selectedIndex >= #state.customIDs then return end
+        state.customIDs[selectedIndex], state.customIDs[selectedIndex + 1] = state.customIDs[selectedIndex + 1], state.customIDs[selectedIndex]
+        selectedIndex = selectedIndex + 1
+        refreshCustomList()
+    end, 94, 389, 75)
+    buttonAt(customWindow, "Remove", function()
+        if selectedIndex < 1 or selectedIndex > #state.customIDs then return end
+        table.remove(state.customIDs, selectedIndex)
+        selectedIndex = math.max(1, selectedIndex - 1)
+        refreshCustomList()
+    end, 176, 389, 90)
+    buttonAt(customWindow, "Save route", saveCustom, 12, 431, 115)
+    buttonAt(customWindow, "Use in Paths >", function()
+        if #state.customIDs == 0 then feedback("Add a location first.") return end
+        local preview = {id = "custom-preview", name = nameField:GetText() ~= "" and nameField:GetText() or "Custom Preview", ids = copyIDs(state.customIDs)}
+        local index
+        for i, item in ipairs(ROUTES) do if item.id == "custom-preview" then index = i break end end
+        if index then ROUTES[index] = preview else ROUTES[#ROUTES + 1] = preview index = #ROUTES end
+        state.route, state.step = index, 1
+        if routeCombo then routeCombo:SetEntries(routeEntries(), state.route) end
+        updateRouting()
+        openPaths()
+        feedback("Custom route loaded in Paths.")
+    end, 135, 431, 140)
+    customFeedback = textAt(customWindow, "Custom routes are session-only.", 12, 473, 40)
+    refreshSaved()
+    refreshCustomList()
+    customWindow:Show()
+    log("Safe Cracking Paths: Custom Paths window opened")
+end
+
+local function launcherButton(parent, label, y, callback)
+    local button = ui.Button.new(parent)
+    button.stylesheetID = id.StyleSheet.BUTTON_DEFAULT
+    button.label = label
+    button:SetPos(12, y)
+    button:SetSize(-24, 34, 1, 0)
+    button:Subscribe(ui.Hook.ONBUTTONPRESSED, function()
+        callback()
+        return false
+    end)
+    return button
+end
+local function mountLauncher(parent)
+    if hubRoot then hubRoot:Destroy() hubRoot = nil end
+    hubRoot = ui.Layer.new(parent)
+    hubRoot:SetPos(0, 0)
+    hubRoot:SetSize(0, 0, 1, 1)
+    launcherButton(hubRoot, "Open Paths", 12, openPaths)
+    launcherButton(hubRoot, "Open Custom Paths", 54, openCustom)
+    log("Safe Cracking Paths: launcher mounted")
+end
+Event.ContentLayerReady.Subscribe(HUB_EVENT, function(event)
+    if event and event.component then mountLauncher(event.component) end
+end)
+function PluginShutdown()
+    Event.ContentLayerReady.Unsubscribe(HUB_EVENT)
+    if hubRoot then hubRoot:Destroy() hubRoot = nil end
+    if pathsWindow then pathsWindow:Destroy() pathsWindow = nil end
+    if customWindow then customWindow:Destroy() customWindow = nil end
+end
+log("Safe Cracking Paths: launcher registered - open Plugins")
