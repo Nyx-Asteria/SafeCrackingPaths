@@ -54,7 +54,7 @@ local ROUTES = {
 local state = {
     route = 1, step = 1, overlay = "highlight", running = false, completed = false,
     customIDs = {}, customRoutes = {},
-    editing = nil, selectedStop = "001",
+    editing = nil, selectedStop = 1,
 }
 -- Both windows share the same route state.
 local pathsWindow, customWindow, hubRoot
@@ -62,6 +62,7 @@ local routeSelector = nil
 local progressLabel, objectiveLabel, travelLabel, routeList, startButton, endButton
 local savedCombo, nameField, locationCombo, customList, customFeedback
 local selectedIndex = 1
+local BUILTIN_ROUTE_COUNT = #ROUTES
 local tracking = { lastPosition = nil, note = "Waiting for player position", lastObject = nil }
 local TRACK_EVENT = "safecracking-tracking"
 local HUB_EVENT = "safecracking-launcher"
@@ -106,6 +107,32 @@ local function matchesTarget(coord, action)
     return false
 end
 
+-- Count actual safes rather than locations or travel actions.
+local function safeCount(ids)
+    local count = 0
+    for _, stopID in ipairs(ids) do
+        local stop = STOP_DATA[stopID]
+        if stop then
+            for _, action in ipairs(stop.steps) do
+                if action.object == "Safe" then count = count + 1 end
+            end
+        end
+    end
+    return count
+end
+
+local function safeProgress(actions, step, completed)
+    local cracked = 0
+    for index, entry in ipairs(actions) do
+        if index < step and entry.action.object == "Safe" then
+            cracked = cracked + 1
+        end
+    end
+    local total = safeCount(currentIDs())
+    if completed then cracked = total end
+    return cracked, total
+end
+
 local function updateRouting()
     local actions = actionsForRoute()
     local total = #actions
@@ -115,7 +142,8 @@ local function updateRouting()
     local action = item.action
     local label = action.action or (action.object == "Safe" and "Crack safe" or "Interact")
     local percent = state.completed and 100 or math.floor((state.step - 1) / total * 100)
-    if progressLabel then progressLabel.content = string.format("%d%% | Action %d / %d | Safe %d / %d", percent, state.step, total, item.locationIndex, #currentIDs()) end
+    local cracked, totalSafes = safeProgress(actions, state.step, state.completed)
+    if progressLabel then progressLabel.content = string.format("%d%% | Action %d / %d | Safes %d / %d", percent, state.step, total, cracked, totalSafes) end
     if objectiveLabel then objectiveLabel.content = state.completed and "Route complete" or string.format("%s: %s", item.location, label) end
     if travelLabel then
         local description = action.detail or (action.object and ("Target: " .. action.object) or "Proceed to the target")
@@ -618,11 +646,50 @@ local function changeStep(amount)
     end
     updateRouting()
 end
+
+local MAX_CUSTOM_ROUTES = 5
+local saveAsNewButton
+local routeLimitText
+local routeLimitHint
+
+local function refreshRouteLimit()
+    local count = #state.customRoutes
+    local full = count >= MAX_CUSTOM_ROUTES
+    if routeLimitText then
+        routeLimitText.content = string.format("CUSTOM ROUTES: %d / %d", count, MAX_CUSTOM_ROUTES)
+    end
+    if routeLimitHint then
+        routeLimitHint.content = full and "Limit reached - delete a saved route to make room." or ""
+    end
+    if saveAsNewButton then
+        -- Keep the button clickable so the capacity message remains available.
+        -- The save handler enforces the limit independently of button styling.
+        saveAsNewButton.label = full and "Save as new (full)" or "Save as new"
+    end
+end
+
+local function syncCustomRoutes()
+    for i = #ROUTES, BUILTIN_ROUTE_COUNT + 1, -1 do ROUTES[i] = nil end
+    for i, custom in ipairs(state.customRoutes) do
+        ROUTES[#ROUTES + 1] = {id = "custom-" .. i, name = custom.name, ids = copyIDs(custom.ids)}
+    end
+    if state.route > #ROUTES then
+        state.route, state.step, state.running, state.completed = 1, 1, false, false
+    end
+    if routeSelector then
+        local active = ROUTES[state.route]
+        routeSelector:SetText(string.format("%s (%d safes)", active.name, safeCount(active.ids)))
+        routeSelector:SetExpanded(false)
+    end
+    if state.route > BUILTIN_ROUTE_COUNT then updateRouting() end
+    refreshRouteLimit()
+end
+
 local function refreshCustomList()
     if not customList then return end
     local entries = {}
     for i, id in ipairs(state.customIDs) do
-        entries[i] = {id = i, label = string.format("%02d  %s", i, STOP_NAMES[id] or id)}
+        entries[i] = {id = i, label = string.format("%02d  %s  (%d safes)", i, STOP_NAMES[id] or id, safeCount({id}))}
     end
     if #entries == 0 then entries[1] = {id = 0, label = "No safes added"} end
     customList:SetEntries(entries)
@@ -631,7 +698,7 @@ local function refreshSaved()
     if not savedCombo then return end
     local entries = {{id = 0, label = "New / unsaved route"}}
     for i, custom in ipairs(state.customRoutes) do
-        entries[#entries + 1] = {id = i, label = custom.name}
+        entries[#entries + 1] = {id = i, label = string.format("%s (%d safes)", custom.name, safeCount(custom.ids))}
     end
     savedCombo:SetEntries(entries)
 end
@@ -644,19 +711,33 @@ local function showCustom(index)
     refreshCustomList()
     feedback(selected and ("Editing: " .. selected.name) or "New route")
 end
-local function saveCustom()
+local function saveCustom(asNew)
     local name = nameField:GetText()
     if #name < 1 or #name > 60 then feedback("Name must be 1-60 characters.") return end
     if #state.customIDs == 0 then feedback("Add at least one safe.") return end
     local entry = {name = name, ids = copyIDs(state.customIDs)}
-    if state.editing then
-        state.customRoutes[state.editing] = entry
-    else
+    local creating = asNew or not state.editing
+    if creating then
+        if #state.customRoutes >= MAX_CUSTOM_ROUTES then
+            feedback("Custom routes full (5 / 5). Delete a saved route to create another.")
+            refreshRouteLimit()
+            return
+        end
         state.customRoutes[#state.customRoutes + 1] = entry
         state.editing = #state.customRoutes
+    else
+        local editingActive = state.route == BUILTIN_ROUTE_COUNT + state.editing
+        state.customRoutes[state.editing] = entry
+        if editingActive then
+            -- An edited active route may have different actions; pause before applying it.
+            state.running, state.completed = false, false
+            if startButton then startButton.label = "Start route" end
+        end
     end
     refreshSaved()
-    feedback("Saved for this session: " .. name)
+    syncCustomRoutes()
+    feedback((creating and "Created new route: " or "Updated route: ") .. name .. " (session only)")
+    refreshRouteLimit()
 end
 
 -- Position controls relative to the window content area.
@@ -688,7 +769,7 @@ local function openPaths()
     local menuLayer
     local function routeCaption()
         local route = ROUTES[state.route]
-        return string.format("%s (%d safes)", route.name, #route.ids)
+        return string.format("%s (%d safes)", route.name, safeCount(route.ids))
     end
     local function hideRouteMenu()
         if menuLayer then menuLayer:Destroy() menuLayer = nil end
@@ -711,7 +792,7 @@ local function openPaths()
             local routeIndex = index
             local button = ui.Button.new(menuLayer)
             button.stylesheetID = id.StyleSheet.BUTTON_DEFAULT
-            button.label = string.format("%s (%d safes)", item.name, #item.ids)
+            button.label = string.format("%s (%d safes)", item.name, safeCount(item.ids))
             button:SetPos(0, (index - 1) * 29)
             button:SetSize(395, 29)
             button:Subscribe(ui.Hook.ONBUTTONPRESSED, function()
@@ -781,7 +862,7 @@ local function openCustom()
     assert(parent, "Plugin build layer unavailable")
     customWindow = prettyui.Window.new(parent, {
         title = "Safe Cracking Paths - Custom Paths", x = 730, y = 145,
-        width = 430, height = 585, resizable = false,
+        width = 430, height = 625, resizable = false,
     })
     textAt(customWindow, "SAVED CUSTOM ROUTES", 12, 8, 20, GOLD)
     savedCombo = prettyui.ComboBox.new(customWindow.content, {
@@ -792,44 +873,53 @@ local function openCustom()
     buttonAt(customWindow, "New", function() showCustom(0) end, 270, 30, 60)
     buttonAt(customWindow, "Delete", function()
         if not state.editing then feedback("Select a saved route first.") return end
-        table.remove(state.customRoutes, state.editing)
+        local deleted = state.editing
+        if state.route == BUILTIN_ROUTE_COUNT + deleted then
+            state.route, state.step, state.running, state.completed = 1, 1, false, false
+        elseif state.route > BUILTIN_ROUTE_COUNT + deleted then
+            state.route = state.route - 1
+        end
+        table.remove(state.customRoutes, deleted)
         showCustom(0)
         refreshSaved()
+        syncCustomRoutes()
         feedback("Route deleted from this session.")
+        refreshRouteLimit()
     end, 337, 30, 70)
     textAt(customWindow, "ROUTE NAME", 12, 68, 20, GOLD)
     nameField = prettyui.TextField.new(customWindow.content, {
         x = 12, y = 90, width = -24, widthAnchor = 1.0,
         height = 30, placeholder = "My safecracking route", maxLength = 60,
     })
-    textAt(customWindow, "ADD SAFE", 12, 130, 20, GOLD)
+    textAt(customWindow, "ADD LOCATION", 12, 130, 20, GOLD)
     local stops = {}
     for i = 1, 31 do
         local stopID = string.format("%03d", i)
-        stops[i] = {id = stopID, label = STOP_NAMES[stopID] or stopID}
+        stops[i] = {id = i, label = STOP_NAMES[stopID] or stopID}
     end
     locationCombo = prettyui.ComboBox.new(customWindow.content, {
-        x = 12, y = 152, width = 245, height = 28,
+        x = 12, y = 152, width = 395, height = 28,
         entries = stops, selectedID = state.selectedStop,
-        onChange = function(_, stopID) state.selectedStop = stopID end,
+        onChange = function(_, stopIndex) state.selectedStop = stopIndex end,
     })
     buttonAt(customWindow, "+ Add", function()
+        local stopID = string.format("%03d", state.selectedStop)
         for _, id in ipairs(state.customIDs) do
-            if id == state.selectedStop then feedback("Safe already in route.") return end
+            if id == stopID then feedback("Location already in route.") return end
         end
-        state.customIDs[#state.customIDs + 1] = state.selectedStop
+        state.customIDs[#state.customIDs + 1] = stopID
         refreshCustomList()
-        feedback("Safe added.")
-    end, 266, 152, 67)
+        feedback("Location added.")
+    end, 12, 185, 90)
     buttonAt(customWindow, "Clear", function()
         state.customIDs = {}
         selectedIndex = 1
         refreshCustomList()
-        feedback("Safes cleared.")
-    end, 340, 152, 67)
-    textAt(customWindow, "ROUTE ORDER", 12, 192, 20, GOLD)
+        feedback("Route cleared.")
+    end, 110, 185, 90)
+    textAt(customWindow, "ROUTE ORDER - SELECT A LOCATION TO MOVE", 12, 229, 20, GOLD)
     customList = prettyui.List.new(customWindow.content, {
-        x = 12, y = 214, width = -24, widthAnchor = 1.0,
+        x = 12, y = 251, width = -24, widthAnchor = 1.0,
         height = 162, maxSelected = 1,
         entries = {{id = 0, label = "No safes added"}},
         onChange = function(_, index, selected) if selected then selectedIndex = index end end,
@@ -839,38 +929,43 @@ local function openCustom()
         state.customIDs[selectedIndex], state.customIDs[selectedIndex - 1] = state.customIDs[selectedIndex - 1], state.customIDs[selectedIndex]
         selectedIndex = selectedIndex - 1
         refreshCustomList()
-    end, 12, 389, 75)
+    end, 12, 426, 75)
     buttonAt(customWindow, "Down", function()
         if selectedIndex < 1 or selectedIndex >= #state.customIDs then return end
         state.customIDs[selectedIndex], state.customIDs[selectedIndex + 1] = state.customIDs[selectedIndex + 1], state.customIDs[selectedIndex]
         selectedIndex = selectedIndex + 1
         refreshCustomList()
-    end, 94, 389, 75)
+    end, 94, 426, 75)
     buttonAt(customWindow, "Remove", function()
         if selectedIndex < 1 or selectedIndex > #state.customIDs then return end
         table.remove(state.customIDs, selectedIndex)
         selectedIndex = math.max(1, selectedIndex - 1)
         refreshCustomList()
-    end, 176, 389, 90)
-    buttonAt(customWindow, "Save route", saveCustom, 12, 431, 115)
+    end, 176, 426, 90)
+    buttonAt(customWindow, "Save route", function() saveCustom(false) end, 12, 468, 112)
+    saveAsNewButton = buttonAt(customWindow, "Save as new", function() saveCustom(true) end, 131, 468, 112)
     buttonAt(customWindow, "Use in Paths >", function()
-        if #state.customIDs == 0 then feedback("Add a safe first.") return end
-        local preview = {id = "custom-preview", name = nameField:GetText() ~= "" and nameField:GetText() or "Custom Preview", ids = copyIDs(state.customIDs)}
-        local index
-        for i, item in ipairs(ROUTES) do if item.id == "custom-preview" then index = i break end end
-        if index then ROUTES[index] = preview else ROUTES[#ROUTES + 1] = preview index = #ROUTES end
-        state.route, state.step, state.running, state.completed = index, 1, false, false
+        if not state.editing or not state.customRoutes[state.editing] then
+            feedback("Save your route before using it.") return
+        end
+        syncCustomRoutes()
+        state.route = BUILTIN_ROUTE_COUNT + state.editing
+        state.step, state.running, state.completed = 1, false, false
         if startButton then startButton.label = "Start route" end
         if routeSelector then
-            routeSelector:SetText(string.format("%s (%d safes)", preview.name, #preview.ids))
+            local chosen = ROUTES[state.route]
+            routeSelector:SetText(string.format("%s (%d safes)", chosen.name, safeCount(chosen.ids)))
             routeSelector:SetExpanded(false)
         end
         updateRouting()
         openPaths()
         feedback("Custom route loaded in Paths.")
-    end, 135, 431, 140)
-    customFeedback = textAt(customWindow, "Custom routes are session-only.", 12, 473, 40)
+    end, 250, 468, 157)
+    routeLimitText = textAt(customWindow, "", 12, 506, 22, GOLD)
+    routeLimitHint = textAt(customWindow, "", 12, 528, 22)
+    customFeedback = textAt(customWindow, "Routes are saved for this session only.", 12, 552, 22)
     refreshSaved()
+    refreshRouteLimit()
     refreshCustomList()
     customWindow:Show()
     log("Safe Cracking Paths: Custom Paths window opened")
