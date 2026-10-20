@@ -401,6 +401,86 @@ end
 -- The highlight is a spatial outline, not a model-level selection effect.
 local MARKER_COLOUR = 0xF2C66DFF
 local TILE_COLOUR = 0xF2C66D88
+-- Locate the loaded world object corresponding to the current route objective.
+-- Multi-tile objects can have an origin tile different from the target tile.
+local function markerObject(target, kind)
+    if not LocList or type(LocList.All) ~= "function" then return nil end
+    local ok, objects = pcall(LocList.All)
+    if not ok or not objects then return nil end
+    local chosen, best = nil, math.huge
+    for _, loc in pairs(objects) do
+        if loc and loc.isValid ~= false then
+            local okInfo, c, w, l, name = pcall(function()
+                local cfg = loc.config
+                return loc.coordGrid, loc.width, loc.length,
+                    ((cfg and cfg.configName) or "") .. " " .. (loc.displayName or "")
+            end)
+            if okInfo and c and c.level == target.plane then
+                w, l = math.max(1, tonumber(w) or 1), math.max(1, tonumber(l) or 1)
+                local dx, dz = target.x - c.x, target.y - c.z
+                local near = dx >= -1 and dz >= -1 and dx <= w and dz <= l
+                local lower = name:lower()
+                local wanted = kind == "Safe" and lower:find("safe", 1, true)
+                    or kind == "Ladder" and lower:find("ladder", 1, true)
+                    or (kind == "Steps" or kind == "Staircase") and
+                        (lower:find("stair", 1, true) or lower:find("step", 1, true))
+                    or kind == "Exit" and (lower:find("door", 1, true)
+                        or lower:find("exit", 1, true) or lower:find("gate", 1, true))
+                if near and wanted then
+                    local score = math.abs(dx) + math.abs(dz)
+                    if score < best then chosen, best = loc, score end
+                end
+            end
+        end
+    end
+    return chosen
+end
+
+-- Use the actual rotated footprint and, when provided, custom picking bounds.
+-- The custom AABB is local to the object's placement; transform it to world space.
+local function markerBounds(target, kind, ground)
+    local loc = markerObject(target, kind)
+    if not loc then return nil end
+    local ok, result = pcall(function()
+        local c, cfg = loc.coordGrid, loc.config
+        local width = math.max(1, tonumber(loc.width) or 1)
+        local length = math.max(1, tonumber(loc.length) or 1)
+        local x0, z0 = c.x * 512, c.z * 512
+        local x1, z1 = x0 + width * 512, z0 + length * 512
+        local bottom, top = ground + 12, ground + 640
+        if kind == "Ladder" then top = ground + 1550
+        elseif kind == "Staircase" or kind == "Steps" then top = ground + 1100 end
+        local custom = cfg and cfg.hasCustomBounding and cfg.customBounding
+        if custom then
+            local lo, hi = custom.minimum, custom.maximum
+            if lo and hi and hi.x > lo.x and hi.y > lo.y and hi.z > lo.z
+                and hi.x - lo.x < 4096 and hi.z - lo.z < 4096
+                and hi.y - lo.y < 4096 then
+                -- Object-local AABBs are centred on the object's origin.
+                -- Rotate horizontal corners using the entity's quarter-turn orientation.
+                local angle = (tonumber(loc.rotationType) or 0) % 4
+                local cx, cz = (c.x + width / 2) * 512, (c.z + length / 2) * 512
+                local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
+                for _, px in ipairs({lo.x, hi.x}) do
+                    for _, pz in ipairs({lo.z, hi.z}) do
+                        local rx, rz = px, pz
+                        if angle == 1 then rx, rz = -pz, px
+                        elseif angle == 2 then rx, rz = -px, -pz
+                        elseif angle == 3 then rx, rz = pz, -px end
+                        minX, maxX = math.min(minX, cx + rx), math.max(maxX, cx + rx)
+                        minZ, maxZ = math.min(minZ, cz + rz), math.max(maxZ, cz + rz)
+                    end
+                end
+                x0, x1, z0, z1 = minX, maxX, minZ, maxZ
+                bottom, top = ground + lo.y, ground + hi.y
+            end
+        end
+        return {x0=x0, x1=x1, z0=z0, z1=z1, bottom=bottom, top=top}
+    end)
+    if ok then return result end
+    return nil
+end
+
 local function drawObjectiveMarker()
     if not state.running or state.completed or not World.IsAvailable() then return end
     local player = Player.GetEntity()
@@ -423,11 +503,15 @@ local function drawObjectiveMarker()
                 local x, z = (target.x + 0.5) * 512, (target.y + 0.5) * 512
                 local ground, valid = World.GetGroundHeight(target.plane, x, z)
                 if valid then
-                    local half = 242
-                    local y = ground + 12
+                    local bounds = markerBounds(target, action.object, ground)
+                    local x0 = bounds and bounds.x0 or x - 242
+                    local x1 = bounds and bounds.x1 or x + 242
+                    local z0 = bounds and bounds.z0 or z - 242
+                    local z1 = bounds and bounds.z1 or z + 242
+                    local y = bounds and bounds.bottom or ground + 12
                     local vertices = {
-                        Vector3.new(x-half, y, z-half), Vector3.new(x+half, y, z-half),
-                        Vector3.new(x+half, y, z+half), Vector3.new(x-half, y, z+half),
+                        Vector3.new(x0, y, z0), Vector3.new(x1, y, z0),
+                        Vector3.new(x1, y, z1), Vector3.new(x0, y, z1),
                     }
                     if state.overlay == "tile" then
                         ShapeList.Draw({shapePositions = vertices,
@@ -437,9 +521,9 @@ local function drawObjectiveMarker()
                             shapeLines = {0, 1, 1, 2, 2, 3, 3, 0},
                             colour = MARKER_COLOUR, lineWidth = 5, ignoreDepth = false})
                     else
-                        -- A wireframe around the target tile is a safe fallback
-                        -- until a matching LocEntity's model bounds are available.
-                        local top = ground + 640
+                        -- The object footprint/custom bounds drive the outline;
+                        -- use the existing tile-sized box if no object was found.
+                        local top = bounds and bounds.top or ground + 640
                         for i = 1, 4 do
                             local p = vertices[i]
                             vertices[#vertices + 1] = Vector3.new(p.x, top, p.z)
