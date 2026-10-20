@@ -50,15 +50,17 @@ local ROUTES = {
 }
 
 local state = {
-    route = 1, step = 1, overlay = "highlight",
+    route = 1, step = 1, overlay = "highlight", running = false, completed = false,
     customName = "", customIDs = {}, customRoutes = {},
     editing = nil, selectedStop = "001", jsonText = "",
 }
 -- Both windows share the same route state.
 local pathsWindow, customWindow, hubRoot
-local routeCombo, progressLabel, objectiveLabel, travelLabel, statusLabel, routeList
+local routeCombo, progressLabel, objectiveLabel, travelLabel, statusLabel, routeList, startButton, endButton
 local savedCombo, nameField, locationCombo, customList, customFeedback
 local selectedIndex = 1
+local tracking = { lastPosition = nil, note = "Waiting for player position", lastObject = nil }
+local TRACK_EVENT = "safecracking-tracking"
 local HUB_EVENT = "safecracking-launcher"
 
 local function route() return ROUTES[state.route] end
@@ -85,6 +87,26 @@ local function actionsForRoute()
     end
     return result
 end
+local function activeAction()
+    return actionsForRoute()[state.step]
+end
+
+local function matchesTarget(coord, action)
+    if not coord or not action then return false end
+    if coord.level ~= action.plane then return false end
+    if coord.x == action.x and coord.z == action.y then return true end
+    for _, alternate in ipairs(action.alternateTargets or {}) do
+        if coord.level == alternate.plane and coord.x == alternate.x and coord.z == alternate.y then
+            return true
+        end
+    end
+    return false
+end
+
+local function trackingStatus()
+    return (state.completed and "Completed" or (state.running and "Running" or "Stopped")) .. " | " .. tracking.note
+end
+
 local function updateRouting()
     local actions = actionsForRoute()
     local total = #actions
@@ -94,15 +116,15 @@ local function updateRouting()
     local action = item.action
     local label = action.action or (action.object == "Safe" and "Crack safe" or "Interact")
     local coords = string.format("%d, %d | Floor %d", action.x or 0, action.y or 0, action.plane or 0)
-    local percent = math.floor((state.step - 1) / total * 100)
+    local percent = state.completed and 100 or math.floor((state.step - 1) / total * 100)
     if progressLabel then progressLabel.content = string.format("%d%% | Action %d / %d | Location %d / %d", percent, state.step, total, item.locationIndex, #currentIDs()) end
-    if objectiveLabel then objectiveLabel.content = string.format("%s: %s", item.location, label) end
+    if objectiveLabel then objectiveLabel.content = state.completed and "Route complete" or string.format("%s: %s", item.location, label) end
     if travelLabel then
         local description = action.detail or (action.object and ("Target: " .. action.object) or "Proceed to the target")
         local travel = action.travel and (" | " .. action.travel) or ""
         travelLabel.content = description .. " | " .. coords .. travel
     end
-    if statusLabel then statusLabel.content = "Manual navigation | Overlay: " .. state.overlay .. (action.optional and " | Optional action" or "") end
+    if statusLabel then statusLabel.content = trackingStatus() .. " | " .. state.overlay .. (action.optional and " | Optional" or "") end
     if routeList then
         local entries = {}
         for i, entry in ipairs(actions) do
@@ -113,8 +135,239 @@ local function updateRouting()
         routeList:SetEntries(entries)
     end
 end
+local function updatePlayerTracking()
+    local player = Player.GetEntity()
+    local coord = player and player.coordGrid
+    if not coord then
+        tracking.lastPosition = nil
+        tracking.note = "Waiting for player position"
+        return
+    end
+
+    local previous = tracking.lastPosition
+    tracking.lastPosition = {x = coord.x, z = coord.z, level = coord.level}
+    local item = activeAction()
+    if not item or state.completed then return end
+    local action = item.action
+    local dx, dz = coord.x - action.x, coord.z - action.y
+    local distance = math.floor(math.sqrt(dx * dx + dz * dz) + 0.5)
+    tracking.note = string.format("%d tiles | Floor %d/%d", distance, coord.level, action.plane)
+
+    -- A floor transition is meaningful only when it starts at the correct
+    -- staircase and arrives on the expected floor. Safe interactions are not
+    -- inferred from position alone.
+    if state.running and previous and action.advancePlane ~= nil and previous.level == action.plane
+        and coord.level == action.advancePlane then
+        local from = {x = previous.x, z = previous.z, level = previous.level}
+        if matchesTarget(from, action) or
+            (math.abs(from.x - action.x) <= 2 and math.abs(from.z - action.y) <= 2) then
+            if state.step >= #actionsForRoute() then
+                state.running, state.completed = false, true
+                if startButton then startButton.label = "Restart route" end
+            else
+                state.step = state.step + 1
+            end
+            tracking.note = "Floor transition detected"
+            updateRouting()
+        end
+    end
+end
+
+local function inspectLocation(event, description)
+    local item = activeAction()
+    if not item or not event or not matchesTarget(event.coordGrid, item.action) then return end
+    tracking.lastObject = description
+    tracking.note = "Target object: " .. description
+    log("Safe Cracking Paths: " .. description .. " at " .. tostring(event.coordGrid))
+    if statusLabel then statusLabel.content = tracking.note end
+end
+
+-- Draw a compass ring around the player with an outward-facing pointer.
+-- Distance is drawn with filled numerals in world space.
+local ARROW_EVENT = "safecracking-direction-arrow"
+local RING_COLOUR = 0xF2C66DFF
+local LABEL_COLOUR = 0xFFFFFFFF
+local DIGITS = {
+    ["0"] = "abcfed", ["1"] = "bc", ["2"] = "abged", ["3"] = "abgcd",
+    ["4"] = "fgbc", ["5"] = "afgcd", ["6"] = "afgecd", ["7"] = "abc",
+    ["8"] = "abcdefg", ["9"] = "abcdfg",
+}
+local SEGMENTS = {
+    a = {0, 2, 1, 2}, b = {1, 2, 1, 1}, c = {1, 1, 1, 0},
+    d = {0, 0, 1, 0}, e = {0, 1, 0, 0}, f = {0, 2, 0, 1},
+    g = {0, 1, 1, 1},
+}
+
+local function drawDirectionArrow()
+    if not state.running or state.completed or not World.IsAvailable() then return end
+    local player = Player.GetEntity()
+    local coord = player and player.coordGrid
+    local item = activeAction()
+    if not coord or not item then return end
+
+    local target = item.action
+    if coord.level ~= target.plane then return end
+    local dx, dz = target.x - coord.x, target.y - coord.z
+    local distance = math.sqrt(dx * dx + dz * dz)
+    if distance < 1.5 then return end
+
+    local fx, fz = dx / distance, dz / distance
+    local sx, sz = -fz, fx
+    local origin = coord:ToCoordFine(true).position
+    origin.y = World.GetGroundHeight(coord.level, origin.x, origin.z) + 150
+    local function point(forward, side)
+        return Vector3.new(origin.x + fx * forward + sx * side,
+            origin.y, origin.z + fz * forward + sz * side)
+    end
+
+    -- A narrow filled annulus provides consistent thickness without line-width limits.
+    local ringPositions, ringTriangles = {}, {}
+    local segments = 64
+    local innerRadius, outerRadius = 375, 400
+    for i = 0, segments - 1 do
+        local angle = i * 2 * math.pi / segments
+        local forward, side = math.cos(angle), math.sin(angle)
+        ringPositions[#ringPositions + 1] = point(innerRadius * forward, innerRadius * side)
+        ringPositions[#ringPositions + 1] = point(outerRadius * forward, outerRadius * side)
+    end
+    for i = 0, segments - 1 do
+        local nextIndex = (i + 1) % segments
+        local inner, outer = i * 2, i * 2 + 1
+        local nextInner, nextOuter = nextIndex * 2, nextIndex * 2 + 1
+        ringTriangles[#ringTriangles + 1] = inner
+        ringTriangles[#ringTriangles + 1] = outer
+        ringTriangles[#ringTriangles + 1] = nextOuter
+        ringTriangles[#ringTriangles + 1] = inner
+        ringTriangles[#ringTriangles + 1] = nextOuter
+        ringTriangles[#ringTriangles + 1] = nextInner
+        -- Double-sided triangles avoid disappearing with camera-facing winding.
+        ringTriangles[#ringTriangles + 1] = nextOuter
+        ringTriangles[#ringTriangles + 1] = outer
+        ringTriangles[#ringTriangles + 1] = inner
+        ringTriangles[#ringTriangles + 1] = nextInner
+        ringTriangles[#ringTriangles + 1] = nextOuter
+        ringTriangles[#ringTriangles + 1] = inner
+    end
+    ShapeList.Draw({shapePositions = ringPositions, shapeTris = ringTriangles,
+        colour = RING_COLOUR, ignoreDepth = true})
+    -- A thin outline adds definition at distant camera zoom levels.
+    local outlinePositions, outlineIndices = {}, {}
+    for i = 0, segments - 1 do
+        local angle = i * 2 * math.pi / segments
+        local nextAngle = (i + 1) * 2 * math.pi / segments
+        local radius = (innerRadius + outerRadius) / 2
+        outlinePositions[#outlinePositions + 1] = point(radius * math.cos(angle), radius * math.sin(angle))
+        outlinePositions[#outlinePositions + 1] = point(radius * math.cos(nextAngle), radius * math.sin(nextAngle))
+        outlineIndices[#outlineIndices + 1] = i * 2
+        outlineIndices[#outlineIndices + 1] = i * 2 + 1
+    end
+    ShapeList.Draw({shapePositions = outlinePositions, shapeLines = outlineIndices,
+        colour = RING_COLOUR, lineWidth = 3, ignoreDepth = true})
+
+    -- Arrowhead extends outward from the ring toward the objective.
+    ShapeList.Draw({
+        shapePositions = {
+            point(505, 0), point(387, -72), point(405, 0),
+            point(387, 72),
+        },
+        shapeTris = {0, 1, 2, 0, 2, 3},
+        colour = RING_COLOUR, ignoreDepth = true,
+    })
+
+    -- Filled seven-segment numerals. Lines alone are too faint on the ground.
+    -- Each segment is a solid quad, with a dark backing for contrast.
+    local value = tostring(math.floor(distance + 0.5))
+    local unit = 62
+    local spacing = unit * 1.55
+    local first = -(#value - 1) * spacing / 2
+
+    local function digitMesh(thickness, heightOffset)
+        local vertices, triangles = {}, {}
+        local function quad(a, b, c, d)
+            local base = #vertices
+            vertices[#vertices + 1] = a
+            vertices[#vertices + 1] = b
+            vertices[#vertices + 1] = c
+            vertices[#vertices + 1] = d
+            triangles[#triangles + 1] = base
+            triangles[#triangles + 1] = base + 1
+            triangles[#triangles + 1] = base + 2
+            triangles[#triangles + 1] = base
+            triangles[#triangles + 1] = base + 2
+            triangles[#triangles + 1] = base + 3
+            triangles[#triangles + 1] = base + 2
+            triangles[#triangles + 1] = base + 1
+            triangles[#triangles + 1] = base
+            triangles[#triangles + 1] = base + 3
+            triangles[#triangles + 1] = base + 2
+            triangles[#triangles + 1] = base
+        end
+        for i = 1, #value do
+            local digit = DIGITS[value:sub(i, i)] or ""
+            local offset = first + (i - 1) * spacing
+            for j = 1, #digit do
+                local segment = SEGMENTS[digit:sub(j, j)]
+                local x1, y1, x2, y2 = segment[1], segment[2], segment[3], segment[4]
+                -- Forward axis is the text's vertical axis; side is horizontal.
+                -- Rotate the numerals 180 degrees in place so they face the player.
+                local f1, f2 = -555 - (2 - y1) * unit, -555 - (2 - y2) * unit
+                local s1, s2 = -(offset + (x1 - 0.5) * unit), -(offset + (x2 - 0.5) * unit)
+                local df, ds = f2 - f1, s2 - s1
+                local length = math.sqrt(df * df + ds * ds)
+                if length > 0 then
+                    local pf, ps = -ds / length * thickness / 2, df / length * thickness / 2
+                    local function raised(f, side)
+                        local v = point(f, side)
+                        v.y = v.y + heightOffset
+                        return v
+                    end
+                    quad(raised(f1 + pf, s1 + ps), raised(f1 - pf, s1 - ps),
+                        raised(f2 - pf, s2 - ps), raised(f2 + pf, s2 + ps))
+                end
+            end
+        end
+        return vertices, triangles
+    end
+    local shadowPositions, shadowTriangles = digitMesh(26, 0)
+    if #shadowPositions > 0 then
+        ShapeList.Draw({shapePositions = shadowPositions, shapeTris = shadowTriangles,
+            colour = 0x141414FF, ignoreDepth = true})
+    end
+    local labelPositions, labelTriangles = digitMesh(17, 2)
+    if #labelPositions > 0 then
+        ShapeList.Draw({shapePositions = labelPositions, shapeTris = labelTriangles,
+            colour = LABEL_COLOUR, ignoreDepth = true})
+    end
+end
+
+Event.Draw.Subscribe(ARROW_EVENT, drawDirectionArrow)
+
+Event.ServerLogic.Subscribe(TRACK_EVENT, function()
+    updatePlayerTracking()
+    if statusLabel then statusLabel.content = trackingStatus() .. " | " .. state.overlay end
+end)
+Event.LocAdded.Subscribe(TRACK_EVENT, function(event)
+    local name = event.config and event.config.configName or "unknown"
+    inspectLocation(event, "Added " .. name)
+end)
+Event.LocRemoved.Subscribe(TRACK_EVENT, function(event)
+    inspectLocation(event, "Removed")
+end)
+Event.LocAnimation.Subscribe(TRACK_EVENT, function(event)
+    inspectLocation(event, event.animation and "Animated" or "Animation stopped")
+end)
+
 local function changeStep(amount)
-    state.step = math.max(1, math.min(#actionsForRoute(), state.step + amount))
+    local total = #actionsForRoute()
+    if total == 0 then return end
+    if amount > 0 and state.step >= total then
+        state.running, state.completed = false, true
+        if startButton then startButton.label = "Restart route" end
+    else
+        state.step = math.max(1, math.min(total, state.step + amount))
+        state.completed = false
+        if startButton then startButton.label = state.running and "Pause route" or "Start route" end
+    end
     updateRouting()
 end
 local function routeEntries()
@@ -193,7 +446,8 @@ local function openPaths()
         entries = routeEntries(), selectedID = state.route,
         onChange = function(_, index)
             if not ROUTES[index] then return end
-            state.route, state.step = index, 1
+            state.route, state.step, state.running, state.completed = index, 1, false, false
+            if startButton then startButton.label = "Start route" end
             updateRouting()
         end,
     })
@@ -211,11 +465,27 @@ local function openPaths()
     buttonAt(pathsWindow, "Previous", function() changeStep(-1) end, 12, 262, 88)
     buttonAt(pathsWindow, "Next >", function() changeStep(1) end, 107, 262, 78)
     buttonAt(pathsWindow, "Refresh", updateRouting, 192, 262, 82)
-    buttonAt(pathsWindow, "Restart", function() state.step = 1 updateRouting() end, 281, 262, 86)
-    textAt(pathsWindow, "ROUTE ACTIONS", 12, 303, 20, GOLD)
+    buttonAt(pathsWindow, "Restart", function()
+        state.step, state.completed = 1, false
+        if startButton then startButton.label = state.running and "Pause route" or "Start route" end
+        updateRouting()
+    end, 281, 262, 86)
+    startButton = buttonAt(pathsWindow, "Start route", function()
+        if state.completed then state.step, state.completed = 1, false end
+        state.running = not state.running
+        if startButton then startButton.label = state.running and "Pause route" or "Start route" end
+        updateRouting()
+    end, 12, 300, 155)
+    endButton = buttonAt(pathsWindow, "End route", function()
+        state.running, state.completed = false, false
+        state.step = 1
+        if startButton then startButton.label = "Start route" end
+        updateRouting()
+    end, 171, 300, 145)
+    textAt(pathsWindow, "ROUTE ACTIONS", 12, 342, 20, GOLD)
     routeList = prettyui.List.new(pathsWindow.content, {
-        x = 12, y = 328, width = -24, widthAnchor = 1.0,
-        height = 114, maxSelected = 1, entries = {},
+        x = 12, y = 365, width = -24, widthAnchor = 1.0,
+        height = 100, maxSelected = 1, entries = {},
         onChange = function(_, index, selected)
             if selected and type(index) == "number" and index >= 1 and index <= #actionsForRoute() then
                 state.step = index
@@ -223,7 +493,7 @@ local function openPaths()
             end
         end,
     })
-    statusLabel = textAt(pathsWindow, "", 12, 452, 22)
+    statusLabel = textAt(pathsWindow, "", 12, 470, 22)
     updateRouting()
     pathsWindow:Show()
     log("Safe Cracking Paths: Paths window opened")
@@ -313,7 +583,8 @@ local function openCustom()
         local index
         for i, item in ipairs(ROUTES) do if item.id == "custom-preview" then index = i break end end
         if index then ROUTES[index] = preview else ROUTES[#ROUTES + 1] = preview index = #ROUTES end
-        state.route, state.step = index, 1
+        state.route, state.step, state.running, state.completed = index, 1, false, false
+        if startButton then startButton.label = "Start route" end
         if routeCombo then routeCombo:SetEntries(routeEntries(), state.route) end
         updateRouting()
         openPaths()
@@ -353,6 +624,11 @@ Event.ContentLayerReady.Subscribe(HUB_EVENT, function(event)
 end)
 function PluginShutdown()
     Event.ContentLayerReady.Unsubscribe(HUB_EVENT)
+    Event.Draw.Unsubscribe(ARROW_EVENT)
+    Event.ServerLogic.Unsubscribe(TRACK_EVENT)
+    Event.LocAdded.Unsubscribe(TRACK_EVENT)
+    Event.LocRemoved.Unsubscribe(TRACK_EVENT)
+    Event.LocAnimation.Unsubscribe(TRACK_EVENT)
     if hubRoot then hubRoot:Destroy() hubRoot = nil end
     if pathsWindow then pathsWindow:Destroy() pathsWindow = nil end
     if customWindow then customWindow:Destroy() customWindow = nil end
