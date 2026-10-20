@@ -173,6 +173,63 @@ local function updatePlayerTracking()
     end
 end
 
+-- Safe state tracking: observe the active object configuration at the target tile.
+-- Advance only after observing a crackable safe become open/looted.
+local safeWatch = {step = nil, wasAvailable = false, lastName = nil}
+
+local function safeNameAtTarget(action)
+    if not LocList or type(LocList.All) ~= "function" then return nil end
+    local ok, locations = pcall(LocList.All)
+    if not ok or not locations then return nil end
+    for _, loc in pairs(locations) do
+        local coord = loc and loc.coordGrid
+        if coord and matchesTarget(coord, action) then
+            local config = loc.config
+            local name = config and config.configName
+            if type(name) == "string" and name:lower():find("safe", 1, true) then
+                return name
+            end
+        end
+    end
+    return nil
+end
+
+local function updateSafeTracking()
+    local item = activeAction()
+    if not state.running or state.completed or not item or item.action.object ~= "Safe" then
+        safeWatch.step, safeWatch.wasAvailable, safeWatch.lastName = nil, false, nil
+        return
+    end
+    if safeWatch.step ~= state.step then
+        safeWatch.step, safeWatch.wasAvailable, safeWatch.lastName = state.step, false, nil
+    end
+    local name = safeNameAtTarget(item.action)
+    if not name then return end
+    local normalized = name:lower()
+    local looted = normalized:find("looted", 1, true) ~= nil
+        or normalized:find("_open", 1, true) ~= nil
+    local available = normalized:find("_closed", 1, true) ~= nil
+        or (not looted and normalized:find("safe", 1, true) ~= nil)
+    if name ~= safeWatch.lastName then
+        log("Safe Cracking Paths: safe state " .. name .. " (action " .. state.step .. ")")
+        safeWatch.lastName = name
+    end
+    if available then
+        safeWatch.wasAvailable = true
+    elseif safeWatch.wasAvailable then
+        safeWatch.wasAvailable = false
+        safeWatch.step = nil
+        tracking.note = "Safe looted - advancing"
+        if state.step >= #actionsForRoute() then
+            state.running, state.completed = false, true
+            if startButton then startButton.label = "Restart route" end
+        else
+            state.step = state.step + 1
+        end
+        updateRouting()
+    end
+end
+
 local function inspectLocation(event, description)
     local item = activeAction()
     if not item or not event or not matchesTarget(event.coordGrid, item.action) then return end
@@ -454,6 +511,7 @@ Event.Draw.Subscribe(ARROW_EVENT, drawDirectionArrow)
 
 Event.ServerLogic.Subscribe(TRACK_EVENT, function()
     updatePlayerTracking()
+    updateSafeTracking()
     if statusLabel then statusLabel.content = trackingStatus() .. " | " .. state.overlay end
 end)
 Event.LocAdded.Subscribe(TRACK_EVENT, function(event)
