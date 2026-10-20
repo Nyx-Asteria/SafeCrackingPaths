@@ -69,6 +69,82 @@ local tracking = { lastPosition = nil, note = "Waiting for player position", las
 local TRACK_EVENT = "safecracking-tracking"
 local HUB_EVENT = "safecracking-launcher"
 
+-- PersistentDB stores only plain Lua values, scoped to this plugin.
+local SAVE_KEY = "safecracking_state_v1"
+local MAX_CUSTOM_ROUTES = 5 -- Also enforced by the custom route editor.
+local function persistState()
+    local savedRoutes = {}
+    for i, custom in ipairs(state.customRoutes) do
+        local ids = {}
+        for j, stopID in ipairs(custom.ids) do ids[j] = stopID end
+        savedRoutes[i] = {name = custom.name, ids = ids}
+    end
+    local selected = ROUTES[state.route]
+    local snapshot = {
+        version = 1,
+        routeID = selected and selected.id or "misthalin",
+        step = state.step,
+        completed = state.completed,
+        overlay = state.overlay,
+        customRoutes = savedRoutes,
+    }
+    local ok, result = pcall(function()
+        return PersistentDB:SetStructuredData(SAVE_KEY, snapshot)
+    end)
+    if not ok or result == false then
+        log("Safe Cracking Paths: could not save persistent state")
+    end
+end
+
+local function restoreState()
+    local ok, snapshot = pcall(function()
+        return PersistentDB:GetStructuredData(SAVE_KEY)
+    end)
+    if not ok or type(snapshot) ~= "table" or snapshot.version ~= 1 then return end
+    if type(snapshot.customRoutes) == "table" then
+        for _, entry in ipairs(snapshot.customRoutes) do
+            if #state.customRoutes >= 5 then break end
+            if type(entry) == "table" and type(entry.name) == "string"
+                and type(entry.ids) == "table" then
+                local ids, seen = {}, {}
+                for _, stopID in ipairs(entry.ids) do
+                    if type(stopID) == "string" and STOP_DATA[stopID] and not seen[stopID] then
+                        ids[#ids + 1] = stopID
+                        seen[stopID] = true
+                    end
+                end
+                if #ids > 0 then
+                    local name = entry.name:sub(1, 80)
+                    state.customRoutes[#state.customRoutes + 1] = {name = name, ids = ids}
+                    ROUTES[#ROUTES + 1] = {
+                        id = "custom-" .. #state.customRoutes, name = name, ids = ids,
+                    }
+                end
+            end
+        end
+    end
+    if type(snapshot.routeID) == "string" then
+        for i, entry in ipairs(ROUTES) do
+            if entry.id == snapshot.routeID then state.route = i break end
+        end
+    end
+    if snapshot.overlay == "highlight" or snapshot.overlay == "tile" or snapshot.overlay == "off" then
+        state.overlay = snapshot.overlay
+    end
+    if type(snapshot.step) == "number" and snapshot.step >= 1 then
+        local total = 0
+        for _, stopID in ipairs(ROUTES[state.route].ids) do
+            total = total + #STOP_DATA[stopID].steps
+        end
+        state.step = math.min(math.floor(snapshot.step), math.max(1, total))
+    end
+    state.completed = snapshot.completed == true
+    -- Resume paused so overlays don't unexpectedly activate at login.
+    state.running = false
+    log("Safe Cracking Paths: restored saved routes and progress")
+end
+restoreState()
+
 local function route() return ROUTES[state.route] end
 local function currentIDs() return route().ids end
 local function copyIDs(ids)
@@ -154,6 +230,7 @@ local function updateRouting()
         travelLabel.content = description .. travel
     end
     if refreshHub then refreshHub() end
+    persistState()
     if routeList then
         local entries = {}
         for i, entry in ipairs(actions) do
@@ -692,7 +769,6 @@ local function changeStep(amount)
     updateRouting()
 end
 
-local MAX_CUSTOM_ROUTES = 5
 local saveAsNewButton
 local routeLimitText
 local routeLimitHint
@@ -736,6 +812,7 @@ local function syncCustomRoutes()
         hubCombo:SetEntries(entries)
     end
     if refreshHub then refreshHub() end
+    persistState()
 end
 
 local function refreshCustomList()
@@ -1016,7 +1093,7 @@ local function openCustom()
     end, 250, 468, 157)
     routeLimitText = textAt(customWindow, "", 12, 506, 22, GOLD)
     routeLimitHint = textAt(customWindow, "", 12, 528, 22)
-    customFeedback = textAt(customWindow, "Routes are saved for this session only.", 12, 552, 22)
+    customFeedback = textAt(customWindow, "Saved routes persist between sessions.", 12, 552, 22)
     refreshSaved()
     refreshRouteLimit()
     refreshCustomList()
@@ -1162,6 +1239,7 @@ Event.ContentLayerReady.Subscribe(HUB_EVENT, function(event)
     if event and event.component then mountLauncher(event.component) end
 end)
 function PluginShutdown()
+    persistState()
     Event.ContentLayerReady.Unsubscribe(HUB_EVENT)
     Event.Draw.Unsubscribe(ARROW_EVENT)
     Event.Draw.Unsubscribe("safecracking-object-marker")
