@@ -58,6 +58,8 @@ local state = {
 }
 -- Both windows share the same route state.
 local pathsWindow, customWindow, hubRoot
+local hubCombo, hubObjective, hubObjectiveSecond, hubDirectionLines, hubTravelLines, hubNavigationButton
+local refreshHub
 local routeSelector = nil
 local progressLabel, objectiveLabel, travelLabel, routeList, startButton, endButton
 local savedCombo, nameField, locationCombo, customList, customFeedback
@@ -151,6 +153,7 @@ local function updateRouting()
         local travel = action.travel and (" | " .. action.travel) or ""
         travelLabel.content = description .. travel
     end
+    if refreshHub then refreshHub() end
     if routeList then
         local entries = {}
         for i, entry in ipairs(actions) do
@@ -179,14 +182,56 @@ local function updatePlayerTracking()
     local distance = math.floor(math.sqrt(dx * dx + dz * dz) + 0.5)
     tracking.note = string.format("%d tiles | Floor %d/%d", distance, coord.level, action.plane)
 
+    -- The fort exit emerges at Wilderness coordinates (2909, 3840),
+    -- NOT at the first safe (2843, 3847). Recognize the destination
+    -- area directly from the player's grid coordinates. This also works
+    -- if navigation starts after the player has already left the fort.
+    if state.running and action.exitTransition then
+        local exitArrivalX, exitArrivalY, exitArrivalPlane = 2909, 3840, 0
+        local arrivalRadius = 20
+        if coord.level == exitArrivalPlane
+            and math.abs(coord.x - exitArrivalX) <= arrivalRadius
+            and math.abs(coord.z - exitArrivalY) <= arrivalRadius then
+            state.step = state.step + 1
+            tracking.note = "Fort exit destination reached"
+            updateRouting()
+            return
+        end
+    end
+
+    -- Beam travel can start via a teleport. If the player is already on the
+    -- required floor at Wizards' Tower, advance without requiring a beam click.
+    if state.running and action.object == "Beam" and action.advancePlane ~= nil
+        and coord.level == action.advancePlane
+        and math.abs(coord.x - action.x) <= 12
+        and math.abs(coord.z - action.y) <= 12 then
+        if state.step >= #actionsForRoute() then
+            state.running, state.completed = false, true
+        else
+            state.step = state.step + 1
+        end
+        tracking.note = "Destination floor reached"
+        updateRouting()
+        return
+    end
+
     -- A floor transition is meaningful only when it starts at the correct
     -- staircase and arrives on the expected floor. Safe interactions are not
     -- inferred from position alone.
-    if state.running and previous and action.advancePlane ~= nil and previous.level == action.plane
-        and coord.level == action.advancePlane then
+    if state.running and previous and action.advancePlane ~= nil
+        and coord.level == action.advancePlane
+        and (previous.level == action.plane
+            or (action.alternativePlanes and (function()
+                for _, floor in ipairs(action.alternativePlanes) do
+                    if previous.level == floor then return true end
+                end
+                return false
+            end)())) then
         local from = {x = previous.x, z = previous.z, level = previous.level}
         if matchesTarget(from, action) or
-            (math.abs(from.x - action.x) <= 2 and math.abs(from.z - action.y) <= 2) then
+            (math.abs(from.x - action.x) <= 2 and math.abs(from.z - action.y) <= 2)
+            or (action.object == "Beam" and math.abs(coord.x - action.x) <= 12
+                and math.abs(coord.z - action.y) <= 12) then
             if state.step >= #actionsForRoute() then
                 state.running, state.completed = false, true
                 if startButton then startButton.label = "Restart route" end
@@ -683,6 +728,14 @@ local function syncCustomRoutes()
     end
     if state.route > BUILTIN_ROUTE_COUNT then updateRouting() end
     refreshRouteLimit()
+    if hubCombo then
+        local entries = {}
+        for i, item in ipairs(ROUTES) do
+            entries[i] = {id = i, label = string.format("%s (%d safes)", item.name, safeCount(item.ids))}
+        end
+        hubCombo:SetEntries(entries)
+    end
+    if refreshHub then refreshHub() end
 end
 
 local function refreshCustomList()
@@ -971,26 +1024,138 @@ local function openCustom()
     log("Safe Cracking Paths: Custom Paths window opened")
 end
 
--- The native plugin panel is intentionally ONLY a two-button launcher.
+-- Compact launcher. Keep all controls within the smallest plugin sidebar.
 local function launcherButton(parent, label, y, callback)
     local button = ui.Button.new(parent)
     button.stylesheetID = id.StyleSheet.BUTTON_DEFAULT
     button.label = label
-    button:SetPos(12, y)
-    button:SetSize(-24, 34, 1, 0)
+    button:SetPos(8, y)
+    button:SetSize(-16, 24, 1, 0)
     button:Subscribe(ui.Hook.ONBUTTONPRESSED, function()
         callback()
         return false
     end)
     return button
 end
+
+local function hubText(parent, value, y, height, colour, font)
+    return prettyui.Text.new(parent, {
+        text = value, x = 8, y = y, width = -16, widthAnchor = 1.0,
+        height = height, colour = colour or 0xE7D7B0FF,
+        font = font or id.Font.MUSEO_SANS_15PT_REGULAR,
+    })
+end
+
+local hubSelectedRoute
+
+-- Word-wrap into native one-line labels; never discard the text to add ellipses.
+-- Three lines per field covers the common steps at minimum Classic UI width.
+local function wrapSidebar(value, width, maxLines)
+    local result, line = {}, ""
+    value = tostring(value or ""):gsub("%s+", " ")
+    for word in value:gmatch("%S+") do
+        -- Split unusually long unbroken words as well.
+        while #word > width do
+            if line ~= "" then result[#result + 1], line = line, "" end
+            result[#result + 1] = word:sub(1, width)
+            word = word:sub(width + 1)
+        end
+        if line == "" then
+            line = word
+        elseif #line + 1 + #word <= width then
+            line = line .. " " .. word
+        else
+            result[#result + 1], line = line, word
+        end
+    end
+    if line ~= "" then result[#result + 1] = line end
+    -- Do not merge overflow into a visible line: that caused horizontal clipping.
+    if #result > maxLines then
+        local last = result[maxLines]
+        result[maxLines] = last:sub(1, width - 3):gsub("%s+$", "") .. "..."
+        for i = #result, maxLines + 1, -1 do result[i] = nil end
+    end
+    return result
+end
+
+refreshHub = function()
+    if not hubRoot then return end
+    local item = activeAction()
+    if hubNavigationButton then
+        hubNavigationButton.label = state.running and "Stop navigation" or "Start navigation"
+    end
+    local location = state.completed and "Route complete" or (item and item.location or "No objective")
+    local names = wrapSidebar(location, 24, 2)
+    if hubObjective then hubObjective.content = names[1] or "" end
+    if hubObjectiveSecond then hubObjectiveSecond.content = names[2] or "" end
+    local action = item and item.action
+    local verb = action and (action.action or (action.object == "Safe" and "Crack safe" or "Interact")) or ""
+    local detail = action and action.detail or ""
+    local travelText = action and action.travel or ""
+    if action and action.object == "Beam" then
+        detail = "Use the beam to floor 2."
+        travelText = "Wicked hood: Guild. Or Draynor lodestone."
+    end
+    local directions = wrapSidebar((action and action.object == "Beam") and detail or (detail ~= "" and (verb .. ": " .. detail) or verb), 23, 3)
+    local travel = wrapSidebar(travelText, 23, 3)
+    for i = 1, 3 do
+        if hubDirectionLines and hubDirectionLines[i] then hubDirectionLines[i].content = directions[i] or "" end
+        if hubTravelLines and hubTravelLines[i] then hubTravelLines[i].content = travel[i] or "" end
+    end
+    if hubCombo and ROUTES[state.route] and hubSelectedRoute ~= state.route then
+        hubSelectedRoute = state.route
+        pcall(function() hubCombo:SetSelectedID(state.route) end)
+    end
+end
+
 local function mountLauncher(parent)
     if hubRoot then hubRoot:Destroy() hubRoot = nil end
+    hubCombo, hubObjective, hubObjectiveSecond, hubDirectionLines, hubTravelLines, hubNavigationButton = nil, nil, nil, nil, nil, nil
     hubRoot = ui.Layer.new(parent)
     hubRoot:SetPos(0, 0)
     hubRoot:SetSize(0, 0, 1, 1)
-    launcherButton(hubRoot, "Open Paths", 12, openPaths)
-    launcherButton(hubRoot, "Open Custom Paths", 54, openCustom)
+
+    local entries = {}
+    for i, item in ipairs(ROUTES) do
+        entries[i] = {id = i, label = string.format("%s (%d safes)", item.name, safeCount(item.ids))}
+    end
+    hubSelectedRoute = state.route
+    hubCombo = prettyui.ComboBox.new(hubRoot, {
+        x = 8, y = 8, width = -16, widthAnchor = 1.0, height = 25,
+        entries = entries, selectedID = state.route,
+        onChange = function(_, index)
+            if not ROUTES[index] or index == state.route then return end
+            hubSelectedRoute = index
+            state.route, state.step, state.running, state.completed = index, 1, false, false
+            if startButton then startButton.label = "Start route" end
+            if routeSelector then
+                local selected = ROUTES[index]
+                routeSelector:SetText(string.format("%s (%d safes)", selected.name, safeCount(selected.ids)))
+                routeSelector:SetExpanded(false)
+            end
+            updateRouting()
+        end,
+    })
+
+    hubText(hubRoot, "CURRENT OBJECTIVE", 38, 14, 0xF2C66DFF)
+    hubObjective = hubText(hubRoot, "", 53, 13)
+    hubObjectiveSecond = hubText(hubRoot, "", 66, 13)
+    hubDirectionLines = {}
+    hubTravelLines = {}
+    for i = 1, 3 do
+        hubDirectionLines[i] = hubText(hubRoot, "", 81 + (i - 1) * 13, 13)
+        hubTravelLines[i] = hubText(hubRoot, "", 121 + (i - 1) * 13, 13, 0xA7D4FFFF)
+    end
+
+    hubNavigationButton = launcherButton(hubRoot, "Start navigation", 166, function()
+        if state.completed then state.step, state.completed = 1, false end
+        state.running = not state.running
+        if startButton then startButton.label = state.running and "Pause route" or "Start route" end
+        updateRouting()
+    end)
+    launcherButton(hubRoot, "Route info", 192, openPaths)
+    launcherButton(hubRoot, "Custom routes", 218, openCustom)
+    refreshHub()
     log("Safe Cracking Paths: launcher mounted")
 end
 Event.ContentLayerReady.Subscribe(HUB_EVENT, function(event)
