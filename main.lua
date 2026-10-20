@@ -340,6 +340,116 @@ local function drawDirectionArrow()
     end
 end
 
+-- Objective markers use the same action coordinates as navigation.
+-- The highlight is a spatial outline, not a model-level selection effect.
+local MARKER_COLOUR = 0xF2C66DFF
+local TILE_COLOUR = 0xF2C66D88
+local function drawObjectiveMarker()
+    if not state.running or state.completed or not World.IsAvailable() then return end
+    local player = Player.GetEntity()
+    local coord = player and player.coordGrid
+    local item = activeAction()
+    if not coord or not item then return end
+    local action = item.action
+    if coord.level ~= action.plane then return end
+
+    local targets = {{x = action.x, y = action.y, plane = action.plane}}
+    for _, alternate in ipairs(action.alternateTargets or {}) do
+        targets[#targets + 1] = alternate
+    end
+
+    for _, target in ipairs(targets) do
+        if target.plane == coord.level then
+            local dx, dz = target.x - coord.x, target.y - coord.z
+            -- Avoid drawing over distant unloaded terrain.
+            if dx * dx + dz * dz <= 48 * 48 then
+                local x, z = (target.x + 0.5) * 512, (target.y + 0.5) * 512
+                local ground, valid = World.GetGroundHeight(target.plane, x, z)
+                if valid then
+                    local half = 242
+                    local y = ground + 12
+                    local vertices = {
+                        Vector3.new(x-half, y, z-half), Vector3.new(x+half, y, z-half),
+                        Vector3.new(x+half, y, z+half), Vector3.new(x-half, y, z+half),
+                    }
+                    if state.overlay == "tile" then
+                        ShapeList.Draw({shapePositions = vertices,
+                            shapeTris = {0, 1, 2, 0, 2, 3, 2, 1, 0, 3, 2, 0},
+                            colour = TILE_COLOUR, ignoreDepth = false})
+                        ShapeList.Draw({shapePositions = vertices,
+                            shapeLines = {0, 1, 1, 2, 2, 3, 3, 0},
+                            colour = MARKER_COLOUR, lineWidth = 5, ignoreDepth = false})
+                    else
+                        -- A wireframe around the target tile is a safe fallback
+                        -- until a matching LocEntity's model bounds are available.
+                        local top = ground + 640
+                        for i = 1, 4 do
+                            local p = vertices[i]
+                            vertices[#vertices + 1] = Vector3.new(p.x, top, p.z)
+                        end
+                        -- Solid rectangular beams keep the outline visible
+                        -- regardless of the renderer's line-width limits.
+                        local beamRadius = 13
+                        local positions, triangles = {}, {}
+                        local edges = {
+                            {1,2},{2,3},{3,4},{4,1},
+                            {5,6},{6,7},{7,8},{8,5},
+                            {1,5},{2,6},{3,7},{4,8},
+                        }
+                        for _, edge in ipairs(edges) do
+                            local a, b = vertices[edge[1]], vertices[edge[2]]
+                            local dx, dy, dz = b.x-a.x, b.y-a.y, b.z-a.z
+                            local length = math.sqrt(dx*dx + dy*dy + dz*dz)
+                            if length > 0 then
+                                local ux, uy, uz = dx / length, dy / length, dz / length
+                                local sx, sy, sz
+                                if math.abs(uy) > 0.9 then
+                                    sx, sy, sz = 1, 0, 0
+                                else
+                                    sx, sy, sz = -uz, 0, ux
+                                    local sl = math.sqrt(sx*sx + sz*sz)
+                                    sx, sz = sx/sl, sz/sl
+                                end
+                                local tx = uy*sz - uz*sy
+                                local ty = uz*sx - ux*sz
+                                local tz = ux*sy - uy*sx
+                                local corners = {
+                                    {sx+tx,sy+ty,sz+tz}, {-sx+tx,-sy+ty,-sz+tz},
+                                    {-sx-tx,-sy-ty,-sz-tz}, {sx-tx,sy-ty,sz-tz},
+                                }
+                                local base = #positions
+                                for _, endpoint in ipairs({a,b}) do
+                                    for _, c in ipairs(corners) do
+                                        positions[#positions+1] = Vector3.new(
+                                            endpoint.x + c[1]*beamRadius,
+                                            endpoint.y + c[2]*beamRadius,
+                                            endpoint.z + c[3]*beamRadius)
+                                    end
+                                end
+                                local faces = {
+                                    {0,1,2},{0,2,3},{4,6,5},{4,7,6},
+                                    {0,4,5},{0,5,1},{1,5,6},{1,6,2},
+                                    {2,6,7},{2,7,3},{3,7,4},{3,4,0},
+                                }
+                                for _, face in ipairs(faces) do
+                                    for _, index in ipairs(face) do
+                                        triangles[#triangles+1] = base + index
+                                    end
+                                end
+                            end
+                        end
+                        ShapeList.Draw({shapePositions = positions,
+                            shapeTris = triangles,
+                            colour = MARKER_COLOUR, ignoreDepth = false})
+                    end
+                end
+            end
+        end
+    end
+end
+
+Event.Draw.Subscribe("safecracking-object-marker", drawObjectiveMarker)
+
 Event.Draw.Subscribe(ARROW_EVENT, drawDirectionArrow)
 
 Event.ServerLogic.Subscribe(TRACK_EVENT, function()
@@ -625,6 +735,7 @@ end)
 function PluginShutdown()
     Event.ContentLayerReady.Unsubscribe(HUB_EVENT)
     Event.Draw.Unsubscribe(ARROW_EVENT)
+    Event.Draw.Unsubscribe("safecracking-object-marker")
     Event.ServerLogic.Unsubscribe(TRACK_EVENT)
     Event.LocAdded.Unsubscribe(TRACK_EVENT)
     Event.LocRemoved.Unsubscribe(TRACK_EVENT)
